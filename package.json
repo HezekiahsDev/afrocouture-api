@@ -8,7 +8,9 @@
   "type": "module",
   "scripts": {
     "build": "nest build",
-    "deploy": "nest deploy",
+    "deploy": "bash scripts/deploy.sh",
+    "deploy:production": "bash scripts/deploy.sh --production",
+    "ship": "bash scripts/deploy.sh",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "nest start",
     "start:dev": "nest start --watch",

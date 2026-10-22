@@ -23,6 +23,9 @@ Thumbs.db
 .env.local
 .env.*.local
 !.env.example
+.env.deploy*
+!.env.deploy.example
+!.env.deploy.production.example
 
 # Testing / coverage
 /coverage
