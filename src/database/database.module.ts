@@ -23,3 +23,4 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
   exports: [TypeOrmModule],
 })
 export class DatabaseModule {}
+
