@@ -1,0 +1,5 @@
+allowBuilds:
+  bcrypt: true
+
+pnpm:
+  minimumReleaseAge: 0

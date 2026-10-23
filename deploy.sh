@@ -37,7 +37,7 @@ load_runtime_path() {
     set +u
   fi
 
-  for profile in "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile" "$HOME/.nvm/nvm.sh"; do
+  for profile in "$HOME/.nvm/nvm.sh" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
     if [[ -f "$profile" ]]; then
       # shellcheck disable=SC1090
       source "$profile" >/dev/null 2>&1 || true
