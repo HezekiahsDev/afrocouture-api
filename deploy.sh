@@ -70,7 +70,7 @@ PM2_BIN="$(command -v pm2)"
 
 echo "Fetching latest code..."
 git fetch origin "$DEPLOY_BRANCH"
-git checkout -B "$DEPLOY_BRANCH" "origin/$DEPLOY_BRANCH"
+git checkout -f -B "$DEPLOY_BRANCH" "origin/$DEPLOY_BRANCH"
 
 if [[ -n "$ENV_FILE" ]]; then
   if [[ ! -f "$ENV_FILE" ]]; then
@@ -99,7 +99,7 @@ if [[ ! -f dist/main.js ]]; then
 fi
 
 echo "Installing dependencies..."
-"$PNPM_BIN" install --frozen-lockfile || "$PNPM_BIN" install
+"$PNPM_BIN" install --frozen-lockfile || "$PNPM_BIN" install --trust-lockfile
 
 echo "Restarting $APP_NAME with PM2 on port $APP_PORT..."
 "$PM2_BIN" stop "$APP_NAME" || true
