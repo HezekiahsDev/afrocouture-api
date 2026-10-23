@@ -99,7 +99,7 @@ if [[ ! -f dist/main.js ]]; then
 fi
 
 echo "Installing dependencies..."
-"$PNPM_BIN" install --frozen-lockfile || "$PNPM_BIN" install --trust-lockfile
+"$PNPM_BIN" install --trust-lockfile
 
 echo "Restarting $APP_NAME with PM2 on port $APP_PORT..."
 "$PM2_BIN" stop "$APP_NAME" || true
