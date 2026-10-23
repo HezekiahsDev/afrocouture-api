@@ -211,3 +211,4 @@ ssh -p "$DEPLOY_SSH_PORT" "$DEPLOY_HOST" "\
   rm -f '$remote_build_artifact' '$remote_env_file'"
 
 echo "Local build deployed to $DEPLOY_HOST:$DEPLOY_PATH ($DEPLOY_TARGET, branch $DEPLOY_BRANCH)"
+

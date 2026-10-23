@@ -108,3 +108,4 @@ PORT="$APP_PORT" "$PM2_BIN" start "$PNPM_BIN" --name "$APP_NAME" -- start:prod
 "$PM2_BIN" save
 
 echo "Deploy complete. $APP_NAME is running with PM2."
+
