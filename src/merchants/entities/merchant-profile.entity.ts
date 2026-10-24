@@ -52,11 +52,19 @@ export class MerchantProfile {
   @Column({ type: 'varchar', nullable: true })
   bankName: string | null;
 
+  /** Paystack bank code for bankName — required for payouts. */
+  @Column({ type: 'varchar', nullable: true })
+  bankCode: string | null;
+
   @Column({ type: 'varchar', nullable: true })
   accountNumber: string | null;
 
   @Column({ type: 'varchar', nullable: true })
   accountName: string | null;
+
+  /** Paystack transfer recipient for the account above; cleared whenever bank details change. */
+  @Column({ type: 'varchar', nullable: true })
+  paystackRecipientCode: string | null;
 
   // ── Review ──
   @Column({ type: 'enum', enum: KycStatus, default: KycStatus.DRAFT })

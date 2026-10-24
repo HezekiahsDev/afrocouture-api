@@ -39,3 +39,6 @@ Thumbs.db
 *.swp
 *.swo
 
+
+# per-agent / scratch builds
+/.build-*

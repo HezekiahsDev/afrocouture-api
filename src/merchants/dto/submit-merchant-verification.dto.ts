@@ -37,6 +37,11 @@ export class SaveMerchantProfileDto {
   @IsOptional() @IsBoolean() qualityDeclarationAccepted?: boolean;
   @IsOptional() @IsString() @MaxLength(80) bankName?: string;
 
+  /** Paystack bank code from GET /payments/banks. */
+  @IsOptional()
+  @Matches(/^[0-9A-Za-z]{2,10}$/, { message: 'Choose your bank from the list.' })
+  bankCode?: string;
+
   @IsOptional()
   @Matches(/^\d{10}$/, { message: 'Account number must be a 10-digit NUBAN.' })
   accountNumber?: string;

@@ -84,6 +84,10 @@ const merchants: (Partial<MerchantProfile> & { fabrics: Partial<Fabric>[] })[] =
         imageUrl: '/images/fabric-ankara-v2.webp',
         price: 8500,
         unit: FabricUnit.YARD,
+        priceTiers: [
+          { minQuantity: 6, price: 8000 },
+          { minQuantity: 12, price: 7500 },
+        ],
         description:
           'A richly patterned cotton wax print with royal blue and gold motifs. A striking choice for statement kaftans and occasion pieces.',
         tags: ['Cotton', 'Wax print', 'Patterned'],
@@ -104,6 +108,7 @@ const merchants: (Partial<MerchantProfile> & { fabrics: Partial<Fabric>[] })[] =
         imageUrl: '/images/fabric-voile-v2.webp',
         price: 16000,
         unit: FabricUnit.YARD,
+        priceTiers: [{ minQuantity: 5, price: 15000 }],
         description:
           'Lightweight voile with a luminous emerald finish and delicate embroidered texture, suited to airy formal silhouettes.',
         tags: ['Lightweight', 'Embroidered', 'Formal'],

@@ -10,6 +10,12 @@ import {
 } from 'typeorm';
 import { MerchantProfile } from '../../merchants/entities/merchant-profile.entity.js';
 
+/** A wholesale price break: buying at least `minQuantity` units costs `price` per unit. */
+export interface PriceTier {
+  minQuantity: number;
+  price: number;
+}
+
 export enum FabricUnit {
   YARD = 'yard',
   BUNDLE = 'bundle',
@@ -50,6 +56,10 @@ export class Fabric {
 
   @Column({ type: 'enum', enum: FabricUnit, default: FabricUnit.YARD })
   unit: FabricUnit;
+
+  /** Optional price breaks, ascending by minQuantity, each cheaper than `price`. Empty = flat price. */
+  @Column({ type: 'jsonb', default: () => "'[]'" })
+  priceTiers: PriceTier[];
 
   @Column({ type: 'int', nullable: true })
   stock: number | null;

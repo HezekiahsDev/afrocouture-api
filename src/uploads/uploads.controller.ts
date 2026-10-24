@@ -12,6 +12,7 @@ import { JwtAuthGuard } from '../common/guards/jwt-auth.guard.js';
 import { CurrentUser } from '../common/decorators/current-user.decorator.js';
 import { User } from '../users/entities/user.entity.js';
 import { CloudinaryService } from './cloudinary.service.js';
+import { RateLimit } from '../common/rate-limit/rate-limit.js';
 
 const MAX_BYTES = 10 * 1024 * 1024;
 const IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
@@ -24,6 +25,7 @@ const PURPOSES: Record<string, string[]> = {
   'merchant-verification': DOCUMENT_TYPES,
   'fit-photo': IMAGE_TYPES,
   fabric: IMAGE_TYPES,
+  chat: IMAGE_TYPES,
 };
 
 @Controller('uploads')
@@ -32,6 +34,7 @@ export class UploadsController {
   constructor(private readonly cloudinary: CloudinaryService) {}
 
   @Post()
+  @RateLimit({ name: 'uploads', limit: 60, windowSec: 60 * 60, by: ['user'] })
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_BYTES, files: 1 } }))
   async upload(
     @CurrentUser() user: User,

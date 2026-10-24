@@ -9,6 +9,7 @@ import { MailService } from '../mail/mail.service.js';
 import { ReviewDecisionDto } from '../common/dto/review.dto.js';
 import { sendReviewOutcome } from '../common/review-mail.js';
 import { definedOnly } from '../common/defined-only.js';
+import { PAYOUT_FIELDS, notifyPayoutAccountChanged, resetRecipientIfChanged } from '../common/payout-account.js';
 
 /** Fields an approved artisan may keep editing without going back through review. */
 const LIVE_EDITABLE: (keyof SaveTailorProfileDto)[] = [
@@ -34,6 +35,7 @@ const REQUIRED_FOR_SUBMIT: [keyof TailorProfile, string][] = [
   ['idType', 'an ID type'],
   ['idDocumentUrl', 'a photo of your ID'],
   ['bankName', 'your payout bank'],
+  ['bankCode', 'your payout bank (choose it from the list)'],
   ['accountNumber', 'your account number'],
   ['accountName', 'the account name'],
 ];
@@ -141,13 +143,23 @@ export class TailorsService {
     const editable =
       profile.kycStatus === KycStatus.APPROVED
         ? Object.fromEntries(
-            Object.entries(sent).filter(([key]) => LIVE_EDITABLE.includes(key as keyof SaveTailorProfileDto)),
+            Object.entries(sent).filter(
+              ([key]) =>
+                LIVE_EDITABLE.includes(key as keyof SaveTailorProfileDto) ||
+                (PAYOUT_FIELDS as readonly string[]).includes(key),
+            ),
           )
         : sent;
 
+    const before = { bankCode: profile.bankCode ?? null, accountNumber: profile.accountNumber ?? null };
     Object.assign(profile, editable);
+    const payoutChanged = resetRecipientIfChanged(profile, before);
     if (profile.kycStatus === KycStatus.REJECTED) profile.kycStatus = KycStatus.DRAFT;
-    return this.tailorRepository.save(profile);
+    const saved = await this.tailorRepository.save(profile);
+    if (payoutChanged && saved.kycStatus === KycStatus.APPROVED) {
+      await notifyPayoutAccountChanged(this.mail, user.email, saved.accountNumber);
+    }
+    return saved;
   }
 
   async submitMine(user: User): Promise<TailorProfile> {

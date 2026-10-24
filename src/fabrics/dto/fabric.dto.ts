@@ -1,4 +1,5 @@
 import { PartialType } from '@nestjs/mapped-types';
+import { Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   IsArray,
@@ -12,8 +13,15 @@ import {
   Max,
   MaxLength,
   Min,
+  ValidateNested,
 } from 'class-validator';
 import { FabricUnit } from '../entities/fabric.entity.js';
+import { MAX_PRICE_TIERS } from '../price-tiers.js';
+
+export class PriceTierDto {
+  @IsInt() @Min(2) @Max(200) minQuantity: number;
+  @IsInt() @Min(100) @Max(10_000_000) price: number;
+}
 
 export class CreateFabricDto {
   @IsString() @Length(2, 120) name: string;
@@ -30,6 +38,15 @@ export class CreateFabricDto {
 
   @IsInt() @Min(100) @Max(10_000_000) price: number;
   @IsOptional() @IsEnum(FabricUnit) unit?: FabricUnit;
+
+  /** Wholesale price breaks; ordering and pricing rules are checked in FabricsService. */
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(MAX_PRICE_TIERS, { message: `Add at most ${MAX_PRICE_TIERS} price breaks.` })
+  @ValidateNested({ each: true })
+  @Type(() => PriceTierDto)
+  priceTiers?: PriceTierDto[];
+
   @IsOptional() @IsInt() @Min(0) stock?: number;
   @IsUrl({ protocols: ['https'], require_protocol: true }) imageUrl: string;
   @IsOptional() @IsBoolean() isPublished?: boolean;

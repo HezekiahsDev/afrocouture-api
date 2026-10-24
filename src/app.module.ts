@@ -1,8 +1,12 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
+import { EventEmitterModule } from '@nestjs/event-emitter';
+import { ScheduleModule } from '@nestjs/schedule';
 import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
 import { DatabaseModule } from './database/database.module.js';
+import { RedisModule } from './common/redis/redis.module.js';
+import { PaymentsModule } from './payments/payments.module.js';
 import { MailModule } from './mail/mail.module.js';
 import { AuthModule } from './auth/auth.module.js';
 import { UsersModule } from './users/users.module.js';
@@ -25,7 +29,10 @@ import { AiStudioModule } from './ai-studio/ai-studio.module.js';
       isGlobal: true,
       envFilePath: ['.env'],
     }),
+    EventEmitterModule.forRoot(),
+    ScheduleModule.forRoot(),
     DatabaseModule,
+    RedisModule,
     MailModule,
     AuthModule,
     UsersModule,
@@ -37,7 +44,7 @@ import { AiStudioModule } from './ai-studio/ai-studio.module.js';
     SavedItemsModule,
     MeasurementsModule,
     AdminModule,
-    // Next phase — modules exist but expose no endpoints yet.
+    PaymentsModule,
     OrdersModule,
     EscrowModule,
     ChatModule,

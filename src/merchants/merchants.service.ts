@@ -9,6 +9,7 @@ import { MailService } from '../mail/mail.service.js';
 import { ReviewDecisionDto } from '../common/dto/review.dto.js';
 import { sendReviewOutcome } from '../common/review-mail.js';
 import { definedOnly } from '../common/defined-only.js';
+import { PAYOUT_FIELDS, notifyPayoutAccountChanged, resetRecipientIfChanged } from '../common/payout-account.js';
 
 /** Fields a verified merchant may keep editing without going back through review. */
 const LIVE_EDITABLE: (keyof SaveMerchantProfileDto)[] = ['marketHub', 'specialtyFabrics'];
@@ -21,6 +22,7 @@ const REQUIRED_FOR_SUBMIT: [keyof MerchantProfile, string][] = [
   ['cacNumber', 'your CAC number'],
   ['cacCertificateUrl', 'your CAC certificate'],
   ['bankName', 'your payout bank'],
+  ['bankCode', 'your payout bank (choose it from the list)'],
   ['accountNumber', 'your account number'],
   ['accountName', 'the account name'],
 ];
@@ -59,14 +61,24 @@ export class MerchantsService {
     const editable: Partial<SaveMerchantProfileDto> =
       profile.verificationStatus === KycStatus.APPROVED
         ? Object.fromEntries(
-            Object.entries(sent).filter(([key]) => LIVE_EDITABLE.includes(key as keyof SaveMerchantProfileDto)),
+            Object.entries(sent).filter(
+              ([key]) =>
+                LIVE_EDITABLE.includes(key as keyof SaveMerchantProfileDto) ||
+                (PAYOUT_FIELDS as readonly string[]).includes(key),
+            ),
           )
         : sent;
 
+    const before = { bankCode: profile.bankCode ?? null, accountNumber: profile.accountNumber ?? null };
     Object.assign(profile, editable);
+    const payoutChanged = resetRecipientIfChanged(profile, before);
     if (editable.cacNumber) profile.cacNumber = editable.cacNumber.toUpperCase().replace(' ', '-');
     if (profile.verificationStatus === KycStatus.REJECTED) profile.verificationStatus = KycStatus.DRAFT;
-    return this.merchantRepository.save(profile);
+    const saved = await this.merchantRepository.save(profile);
+    if (payoutChanged && saved.verificationStatus === KycStatus.APPROVED) {
+      await notifyPayoutAccountChanged(this.mail, user.email, saved.accountNumber);
+    }
+    return saved;
   }
 
   async submitMine(user: User): Promise<MerchantProfile> {

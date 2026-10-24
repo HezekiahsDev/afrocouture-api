@@ -1,7 +1,8 @@
-import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Brackets, Repository } from 'typeorm';
-import { Fabric } from './entities/fabric.entity.js';
+import { Fabric, type PriceTier } from './entities/fabric.entity.js';
+import { checkPriceTiers } from './price-tiers.js';
 import { CreateFabricDto, UpdateFabricDto } from './dto/fabric.dto.js';
 import { MerchantsService } from '../merchants/merchants.service.js';
 import { User } from '../users/entities/user.entity.js';
@@ -17,6 +18,7 @@ export interface PublicFabric {
   tags: string[];
   price: number;
   unit: string;
+  priceTiers: PriceTier[];
   imageUrl: string;
   isSample: boolean;
   merchant: { id: string; businessName: string | null; city: string | null; verified: boolean };
@@ -32,6 +34,7 @@ function toPublicFabric(f: Fabric): PublicFabric {
     tags: f.tags,
     price: f.price,
     unit: f.unit,
+    priceTiers: f.priceTiers ?? [],
     imageUrl: f.imageUrl,
     isSample: f.isSample,
     merchant: {
@@ -106,18 +109,32 @@ export class FabricsService {
 
   async create(user: User, dto: CreateFabricDto): Promise<Fabric> {
     const merchant = await this.merchants.getApprovedMine(user);
-    return this.fabricRepository.save(this.fabricRepository.create({ ...definedOnly(dto), merchantId: merchant.id }));
+    const priceTiers = this.validTiers(dto.priceTiers ?? [], dto.price);
+    return this.fabricRepository.save(
+      this.fabricRepository.create({ ...definedOnly(dto), priceTiers, merchantId: merchant.id }),
+    );
   }
 
   async update(user: User, id: string, dto: UpdateFabricDto): Promise<Fabric> {
     const fabric = await this.ownedFabric(user, id);
     Object.assign(fabric, definedOnly(dto));
+    // Re-check even when only the base price changed: tiers must stay below it.
+    fabric.priceTiers = this.validTiers(fabric.priceTiers ?? [], fabric.price);
     return this.fabricRepository.save(fabric);
   }
 
   async remove(user: User, id: string): Promise<void> {
     const fabric = await this.ownedFabric(user, id);
     await this.fabricRepository.remove(fabric);
+  }
+
+  private validTiers(tiers: PriceTier[], basePrice: number): PriceTier[] {
+    const result = checkPriceTiers(
+      tiers.map((t) => ({ minQuantity: t.minQuantity, price: t.price })),
+      basePrice,
+    );
+    if (!result.ok) throw new BadRequestException(result.message);
+    return result.tiers;
   }
 
   private async ownedFabric(user: User, id: string): Promise<Fabric> {
