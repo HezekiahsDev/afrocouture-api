@@ -38,6 +38,17 @@ export class OtpService {
     private readonly mailService: MailService,
   ) {}
 
+  /** Sends a code unless one went out within the cooldown; resolves to whether a new one was sent. */
+  async sendUnlessRecent(email: string, purpose: OtpPurpose): Promise<boolean> {
+    try {
+      await this.generateAndSend(email, purpose);
+      return true;
+    } catch (err) {
+      if (err instanceof HttpException && err.getStatus() === HttpStatus.TOO_MANY_REQUESTS) return false;
+      throw err;
+    }
+  }
+
   async generateAndSend(email: string, purpose: OtpPurpose): Promise<void> {
     const normalizedEmail = email.toLowerCase().trim();
 

@@ -39,17 +39,24 @@ export class AuthService {
     const existing = await this.userRepository.findOne({ where: { email: dto.email } });
     // Admin accounts are only made with `pnpm admin:create`; never let sign-up touch one.
     if (existing?.emailVerified || existing?.role === UserRole.ADMIN) {
-      throw new ConflictException('An account with this email already exists. Sign in instead.');
+      throw new ConflictException({
+        code: 'ACCOUNT_EXISTS',
+        message: 'You already have an account with this email. Sign in to continue where you left off.',
+      });
     }
 
     const passwordHash = await bcrypt.hash(dto.password, 12);
     const user = existing ?? this.userRepository.create({ email: dto.email });
     user.fullName = dto.fullName.trim();
     user.role = dto.role ?? user.role ?? UserRole.CUSTOMER;
+    // Signing up from a "join as…" button is already a choice of path.
+    if (dto.role) user.pathChosenAt ??= new Date();
     user.passwordHash = passwordHash;
     await this.userRepository.save(user);
 
-    await this.otpService.generateAndSend(dto.email, OtpPurpose.SIGNUP);
+    // Signing up again soon after a first attempt (e.g. they closed the tab) is fine:
+    // the code sent a moment ago still works, so don't fail on the resend cooldown.
+    await this.otpService.sendUnlessRecent(dto.email, OtpPurpose.SIGNUP);
     return { email: dto.email };
   }
 

@@ -27,7 +27,14 @@ export class UsersService {
    * so it needs support instead. Admins never change role here.
    */
   async setRole(user: User, role: UserRole): Promise<User> {
-    if (user.role === role) return user;
+    if (user.role === role) {
+      // Choosing the role they already have still completes the "choose your path" step.
+      if (!user.pathChosenAt) {
+        user.pathChosenAt = new Date();
+        return this.userRepository.save(user);
+      }
+      return user;
+    }
     if (user.role === UserRole.ADMIN) throw new ForbiddenException('Admin accounts cannot change role.');
 
     const [submittedTailor, submittedMerchant, hasOrders] = await Promise.all([
@@ -42,6 +49,7 @@ export class UsersService {
       });
     }
     user.role = role;
+    user.pathChosenAt ??= new Date();
     return this.userRepository.save(user);
   }
 

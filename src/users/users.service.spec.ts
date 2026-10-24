@@ -32,9 +32,17 @@ describe('UsersService.setRole', () => {
     },
   );
 
-  it('treats choosing the current role as a no-op', async () => {
+  it('treats choosing the current role again as a no-op', async () => {
     const { service, users } = setup({ orders: true });
-    await expect(service.setRole(user(UserRole.TAILOR), UserRole.TAILOR)).resolves.toMatchObject({ role: UserRole.TAILOR });
+    const me = Object.assign(user(UserRole.TAILOR), { pathChosenAt: new Date('2026-01-01') });
+    await expect(service.setRole(me, UserRole.TAILOR)).resolves.toMatchObject({ role: UserRole.TAILOR });
     expect(users.save).not.toHaveBeenCalled();
+  });
+
+  it('records the choice when someone picks the role they already have', async () => {
+    const { service, users } = setup({ orders: true });
+    const me = Object.assign(user(UserRole.CUSTOMER), { pathChosenAt: null });
+    await service.setRole(me, UserRole.CUSTOMER);
+    expect(users.save).toHaveBeenCalledWith(expect.objectContaining({ role: UserRole.CUSTOMER, pathChosenAt: expect.any(Date) }));
   });
 });

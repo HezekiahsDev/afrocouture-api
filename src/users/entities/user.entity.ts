@@ -42,6 +42,13 @@ export class User {
   @Column({ type: 'text', nullable: true, select: false })
   suspensionReason?: string | null;
 
+  /**
+   * When they chose how they'll use AfroCouture (shop, make or sell). Null until then, so a
+   * returning account that never chose is sent back to that step after signing in.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  pathChosenAt: Date | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
 

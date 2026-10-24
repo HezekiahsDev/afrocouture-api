@@ -50,12 +50,20 @@ function fakeUsers() {
 
 describe('AuthService', () => {
   let users: ReturnType<typeof fakeUsers>;
-  let otp: { generateAndSend: ReturnType<typeof vi.fn>; verify: ReturnType<typeof vi.fn> };
+  let otp: {
+    generateAndSend: ReturnType<typeof vi.fn>;
+    sendUnlessRecent: ReturnType<typeof vi.fn>;
+    verify: ReturnType<typeof vi.fn>;
+  };
   let service: AuthService;
 
   beforeEach(() => {
     users = fakeUsers();
-    otp = { generateAndSend: vi.fn(async () => undefined), verify: vi.fn(async () => undefined) };
+    otp = {
+      generateAndSend: vi.fn(async () => undefined),
+      sendUnlessRecent: vi.fn(async () => true),
+      verify: vi.fn(async () => undefined),
+    };
     const jwt = new JwtService({ secret: 'access-secret', signOptions: { expiresIn: '15m' } });
     service = new AuthService(users as any, otp as any, jwt, config as any);
   });
@@ -71,14 +79,24 @@ describe('AuthService', () => {
     expect(user.emailVerified).toBe(false);
     expect(user.fullName).toBe('Ada Obi');
     expect(await bcrypt.compare('Needle2026', user.passwordHash!)).toBe(true);
-    expect(otp.generateAndSend).toHaveBeenCalledWith('a@example.com', 'signup');
+    expect(otp.sendUnlessRecent).toHaveBeenCalledWith('a@example.com', 'signup');
   });
 
-  it('refuses to register an email that is already verified', async () => {
+  it('refuses to register an email that is already verified, with a code the web app can act on', async () => {
     await verifiedUser();
+    const attempt = service.register({ email: 'a@example.com', password: 'Needle2026', fullName: 'Someone' });
+    await expect(attempt).rejects.toBeInstanceOf(ConflictException);
+    await expect(attempt).rejects.toMatchObject({ response: { code: 'ACCOUNT_EXISTS' } });
+  });
+
+  it('lets someone who abandoned sign-up start again, even straight away', async () => {
+    await service.register({ email: 'a@example.com', password: 'Needle2026', fullName: 'Ada Obi' });
+    otp.sendUnlessRecent.mockResolvedValueOnce(false); // a code went out moments ago
     await expect(
-      service.register({ email: 'a@example.com', password: 'Needle2026', fullName: 'Someone' }),
-    ).rejects.toBeInstanceOf(ConflictException);
+      service.register({ email: 'a@example.com', password: 'Thread2027', fullName: 'Ada Obi' }),
+    ).resolves.toEqual({ email: 'a@example.com' });
+    expect(users.rows).toHaveLength(1);
+    expect(await bcrypt.compare('Thread2027', users.rows[0].passwordHash!)).toBe(true);
   });
 
   it('blocks login until the email is verified', async () => {

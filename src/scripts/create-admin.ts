@@ -27,6 +27,7 @@ try {
   user.fullName = user.fullName ?? fullName;
   user.role = UserRole.ADMIN;
   user.emailVerified = true;
+  user.pathChosenAt ??= new Date();
   user.status = 'active';
   user.passwordHash = await bcrypt.hash(password, 12);
   await users.save(user);

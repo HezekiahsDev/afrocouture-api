@@ -69,6 +69,11 @@ describe('OtpService', () => {
     await expect(service.generateAndSend('a@example.com', OtpPurpose.SIGNUP)).rejects.toBeInstanceOf(HttpException);
   });
 
+  it('sendUnlessRecent skips the cooldown error instead of throwing', async () => {
+    await expect(service.sendUnlessRecent('a@example.com', OtpPurpose.SIGNUP)).resolves.toBe(true);
+    await expect(service.sendUnlessRecent('a@example.com', OtpPurpose.SIGNUP)).resolves.toBe(false);
+  });
+
   it('accepts the right code once', async () => {
     await service.generateAndSend('a@example.com', OtpPurpose.SIGNUP);
     const code = sentCode();
