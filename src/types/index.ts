@@ -16,6 +16,8 @@ export enum OrderStatus {
 }
 
 export enum KycStatus {
+  /** Saved but not yet submitted for review. */
+  DRAFT = 'draft',
   PENDING = 'pending',
   UNDER_REVIEW = 'under_review',
   APPROVED = 'approved',

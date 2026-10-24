@@ -7,12 +7,13 @@ async function bootstrap() {
   const logger = new Logger('Bootstrap');
   const app = await NestFactory.create(AppModule);
 
+  // FRONTEND_URL may list several origins separated by commas (e.g. QA and production web apps).
+  const frontendOrigins = (process.env.FRONTEND_URL ?? '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
   app.enableCors({
-    origin: [
-      'http://localhost:3000',
-      'http://127.0.0.1:3000',
-      process.env.FRONTEND_URL || '',
-    ].filter(Boolean),
+    origin: ['http://localhost:3000', 'http://127.0.0.1:3000', ...frontendOrigins],
     credentials: true,
   });
 
