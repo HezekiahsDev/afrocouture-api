@@ -6,5 +6,8 @@ export default defineConfig({
     globals: true,
     root: './',
     include: ['**/*.e2e-spec.ts'],
+    // Every suite truncates the same database, so run them one at a time.
+    fileParallelism: false,
+    testTimeout: 30_000,
   },
 });

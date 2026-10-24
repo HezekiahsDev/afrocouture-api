@@ -120,4 +120,40 @@ describe('AuthService', () => {
     await expect(service.refresh(session.refreshToken)).rejects.toBeInstanceOf(UnauthorizedException);
     await expect(service.login({ email: 'a@example.com', password: 'Fresh2027x' })).resolves.toHaveProperty('accessToken');
   });
+
+  describe('suspended accounts', () => {
+    const suspend = () => {
+      users.rows[0].status = 'suspended';
+    };
+
+    it('refuses sign-in with a clear message', async () => {
+      await verifiedUser();
+      suspend();
+      const err = await service.login({ email: 'a@example.com', password: 'Needle2026' }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ForbiddenException);
+      expect((err as ForbiddenException).getResponse()).toMatchObject({ code: 'ACCOUNT_SUSPENDED' });
+    });
+
+    it('refuses to refresh and revokes the refresh token', async () => {
+      const session = await verifiedUser();
+      suspend();
+      const err = await service.refresh(session.refreshToken).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(UnauthorizedException);
+      expect((err as UnauthorizedException).getResponse()).toMatchObject({ code: 'ACCOUNT_SUSPENDED' });
+      expect(users.update).toHaveBeenLastCalledWith(session.user.id, { refreshTokenHash: null });
+    });
+
+    it('does not start a session from a sign-up code', async () => {
+      await service.register({ email: 'b@example.com', password: 'Needle2026', fullName: 'Bola' });
+      suspend();
+      await expect(service.verifyEmail({ email: 'b@example.com', code: '123456' })).rejects.toBeInstanceOf(ForbiddenException);
+    });
+  });
+
+  it('never lets sign-up take over an admin account', async () => {
+    users.rows.push({ id: 'admin-1', email: 'boss@example.com', role: UserRole.ADMIN, status: 'active', emailVerified: false } as User);
+    await expect(
+      service.register({ email: 'boss@example.com', password: 'Needle2026', fullName: 'Mallory' }),
+    ).rejects.toBeInstanceOf(ConflictException);
+  });
 });

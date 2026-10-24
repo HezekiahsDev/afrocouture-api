@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, EntityManager, In, Repository } from 'typeorm';
 import { randomBytes } from 'node:crypto';
@@ -11,6 +11,7 @@ import { Order } from '../orders/entities/order.entity.js';
 import { TailorProfile } from '../tailors/entities/tailor-profile.entity.js';
 import { MerchantProfile } from '../merchants/entities/merchant-profile.entity.js';
 import { PaystackError, PaystackService } from '../payments/paystack.service.js';
+import { AlertsService } from '../common/alerts/alerts.service.js';
 
 export interface EscrowSummary {
   held: number;
@@ -37,6 +38,7 @@ export class EscrowService {
     @InjectDataSource() private readonly dataSource: DataSource,
     @InjectRepository(EscrowTransaction) private readonly txRepository: Repository<EscrowTransaction>,
     private readonly paystack: PaystackService,
+    @Optional() private readonly alerts?: AlertsService,
   ) {}
 
   // ── Reads ──
@@ -61,7 +63,9 @@ export class EscrowService {
     return this.txRepository.find({ where: { orderId }, order: { createdAt: 'ASC' } });
   }
 
-  listByStatus(status: TxStatus): Promise<EscrowTransaction[]> {
+  /** Payouts and refunds in a status, or every transaction (newest first) for 'all'. */
+  listByStatus(status: TxStatus | 'all'): Promise<EscrowTransaction[]> {
+    if (status === 'all') return this.txRepository.find({ order: { createdAt: 'DESC' }, take: 500 });
     return this.txRepository.find({ where: { status }, order: { createdAt: 'ASC' } });
   }
 
@@ -217,6 +221,7 @@ export class EscrowService {
       tx.failureReason = reason || 'Transfer reversed by Paystack';
     } else return;
     await this.txRepository.save(tx);
+    if (tx.status !== TxStatus.SUCCESS) this.alertFailure(tx);
   }
 
   /** refund.processed / refund.failed — matched by Paystack's refund id, else the oldest pending refund on that payment. */
@@ -238,6 +243,7 @@ export class EscrowService {
       tx.failureReason = 'Refund failed at Paystack';
     } else return;
     await this.txRepository.save(tx);
+    if (tx.status === TxStatus.FAILED) this.alertFailure(tx);
   }
 
   // ── Internals ──
@@ -245,7 +251,24 @@ export class EscrowService {
   private async fail(tx: EscrowTransaction, reason: string): Promise<EscrowTransaction> {
     tx.status = TxStatus.FAILED;
     tx.failureReason = reason;
-    return this.txRepository.save(tx);
+    const saved = await this.txRepository.save(tx);
+    this.alertFailure(saved);
+    return saved;
+  }
+
+  /** Money that should have moved didn't: an admin needs to fix the account or retry from /admin. */
+  private alertFailure(tx: EscrowTransaction) {
+    const what = tx.type === TxType.REFUND ? 'Refund' : `Payout to ${tx.partyType ?? 'party'}`;
+    this.alerts?.notify({
+      title: `${what} ${tx.status}: ₦${tx.amount.toLocaleString('en-NG')} (${tx.reference})`,
+      details: [
+        `Reason: ${tx.failureReason ?? 'unknown'}`,
+        `Order: ${tx.orderId}`,
+        `Transaction: ${tx.id}`,
+        'Retry it from the admin console once the cause is fixed.',
+      ].join('\n'),
+      signature: `escrow:${tx.id}:${tx.status}:${tx.reference}`,
+    });
   }
 
   /** The payee's Paystack recipient code, creating and storing one on first payout. */

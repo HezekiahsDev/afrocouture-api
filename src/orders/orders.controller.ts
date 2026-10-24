@@ -1,24 +1,25 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Param, ParseUUIDPipe, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpStatus, Param, ParseUUIDPipe, Post, Query } from '@nestjs/common';
 import { OrdersService } from './orders.service.js';
 import {
   ApproveDto,
   CreateOrderDto,
   ListOrdersQuery,
+  ListReviewsQuery,
   MilestoneDto,
   NoteDto,
   QuoteDto,
   ReasonDto,
+  ReviewDto,
+  ReviewReplyDto,
   VerifyPaymentDto,
 } from './dto/order.dto.js';
-import { JwtAuthGuard } from '../common/guards/jwt-auth.guard.js';
-import { RolesGuard } from '../common/guards/roles.guard.js';
 import { Roles } from '../common/decorators/roles.decorator.js';
 import { CurrentUser } from '../common/decorators/current-user.decorator.js';
 import { User } from '../users/entities/user.entity.js';
 import { UserRole } from '../types/index.js';
+import { Public } from '../common/decorators/public.decorator.js';
 
 @Controller('orders')
-@UseGuards(JwtAuthGuard, RolesGuard)
 export class OrdersController {
   constructor(private readonly orders: OrdersService) {}
 
@@ -128,5 +129,31 @@ export class OrdersController {
   @Roles(UserRole.CUSTOMER)
   dispute(@CurrentUser() user: User, @Param('id', ParseUUIDPipe) id: string, @Body() dto: ReasonDto) {
     return this.orders.dispute(user, id, dto);
+  }
+
+  @Post(':id/review')
+  @HttpCode(HttpStatus.OK)
+  @Roles(UserRole.CUSTOMER)
+  review(@CurrentUser() user: User, @Param('id', ParseUUIDPipe) id: string, @Body() dto: ReviewDto) {
+    return this.orders.review(user, id, dto);
+  }
+
+  @Post(':id/review/reply')
+  @HttpCode(HttpStatus.OK)
+  @Roles(UserRole.TAILOR)
+  replyToReview(@CurrentUser() user: User, @Param('id', ParseUUIDPipe) id: string, @Body() dto: ReviewReplyDto) {
+    return this.orders.replyToReview(user, id, dto);
+  }
+}
+
+/** Public: an artisan's reviews for their profile page. */
+@Public()
+@Controller('tailors/:id/reviews')
+export class TailorReviewsController {
+  constructor(private readonly orders: OrdersService) {}
+
+  @Get()
+  list(@Param('id', ParseUUIDPipe) id: string, @Query() query: ListReviewsQuery) {
+    return this.orders.listReviews(id, query);
   }
 }

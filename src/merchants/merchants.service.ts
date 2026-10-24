@@ -8,6 +8,7 @@ import { User } from '../users/entities/user.entity.js';
 import { MailService } from '../mail/mail.service.js';
 import { ReviewDecisionDto } from '../common/dto/review.dto.js';
 import { sendReviewOutcome } from '../common/review-mail.js';
+import { NotificationsService } from '../notifications/notifications.service.js';
 import { definedOnly } from '../common/defined-only.js';
 import { PAYOUT_FIELDS, notifyPayoutAccountChanged, resetRecipientIfChanged } from '../common/payout-account.js';
 
@@ -35,6 +36,7 @@ export class MerchantsService {
     @InjectRepository(User)
     private readonly userRepository: Repository<User>,
     private readonly mail: MailService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   async getMine(user: User): Promise<MerchantProfile | null> {
@@ -100,7 +102,14 @@ export class MerchantsService {
     profile.verificationStatus = KycStatus.PENDING;
     profile.submittedAt = new Date();
     profile.reviewNote = null;
-    return this.merchantRepository.save(profile);
+    const saved = await this.merchantRepository.save(profile);
+    void this.notifications.notifyAdmins({
+      type: 'admin_verification',
+      title: `Merchant verification submitted`,
+      body: `${profile.businessName ?? 'A merchant'} is waiting for review.`,
+      link: '/admin',
+    });
+    return saved;
   }
 
   async listForReview(status: KycStatus): Promise<MerchantProfile[]> {
@@ -127,6 +136,14 @@ export class MerchantsService {
     const saved = await this.merchantRepository.save(profile);
 
     const owner = profile.userId ? await this.userRepository.findOne({ where: { id: profile.userId } }) : null;
+    void this.notifications.notify(profile.userId, {
+      type: 'verification',
+      title: approved ? 'You’re verified' : 'Your verification needs changes',
+      body: approved
+        ? 'Your fabrics can now be listed in the explorer.'
+        : (profile.reviewNote ?? 'Open your verification to see what to change.'),
+      link: '/onboarding/merchant-verification',
+    });
     if (owner) await sendReviewOutcome(this.mail, owner.email, 'merchant', approved, profile.reviewNote);
     return saved;
   }

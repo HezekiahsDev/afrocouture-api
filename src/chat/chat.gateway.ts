@@ -5,6 +5,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import {
   ConnectedSocket,
   MessageBody,
+  OnGatewayConnection,
   OnGatewayInit,
   SubscribeMessage,
   WebSocketGateway,
@@ -12,7 +13,7 @@ import {
 } from '@nestjs/websockets';
 import type { Namespace, Socket } from 'socket.io';
 import { Repository } from 'typeorm';
-import { ChatService, roomFor } from './chat.service.js';
+import { ChatService, roomFor, userRoom } from './chat.service.js';
 import { User } from '../users/entities/user.entity.js';
 import type { JwtPayload } from '../types/index.js';
 
@@ -53,9 +54,10 @@ const errorMessage = (err: unknown) =>
 /**
  * Live order chat. Clients connect to /chat with `auth: { token: <access JWT> }`,
  * `join_order` an order they belong to, then receive `new_message`, `typing` and `order_updated`.
+ * Every connection also receives `notification` ({ notification, unreadCount }) for its user.
  */
 @WebSocketGateway({ namespace: '/chat', cors: { origin: allowedOrigin, credentials: true } })
-export class ChatGateway implements OnGatewayInit {
+export class ChatGateway implements OnGatewayInit, OnGatewayConnection {
   private readonly logger = new Logger(ChatGateway.name);
 
   @WebSocketServer()
@@ -81,6 +83,11 @@ export class ChatGateway implements OnGatewayInit {
     });
   }
 
+  async handleConnection(client: Socket) {
+    const user = (client.data as Partial<ChatSocketData> | undefined)?.user;
+    if (user) await client.join(userRoom(user.id));
+  }
+
   private async authenticate(socket: Socket): Promise<User> {
     const header = socket.handshake.headers.authorization;
     const token =
@@ -100,10 +107,19 @@ export class ChatGateway implements OnGatewayInit {
     return client.data as ChatSocketData;
   }
 
+  /** Re-reads the account so a suspension takes effect on an already-open connection. */
+  private async stillActive(client: Socket): Promise<boolean> {
+    const current = await this.users.findOne({ where: { id: this.data(client).user.id }, select: { id: true, status: true } });
+    if (current?.status === 'active') return true;
+    client.disconnect(true);
+    return false;
+  }
+
   @SubscribeMessage('join_order')
   async join(@ConnectedSocket() client: Socket, @MessageBody() body: { orderId?: string }): Promise<Ack> {
     const orderId = body?.orderId;
     if (!orderId || !UUID.test(orderId)) return { ok: false, error: 'A valid orderId is required.' };
+    if (!(await this.stillActive(client))) return { ok: false, error: 'unauthorized' };
     try {
       await this.chat.requireMember(orderId, this.data(client).user.id);
       await client.join(roomFor(orderId));
@@ -135,6 +151,7 @@ export class ChatGateway implements OnGatewayInit {
       return { ok: false, error: 'You are sending messages too quickly. Wait a few seconds.' };
     }
     data.sendTimes.push(now);
+    if (!(await this.stillActive(client))) return { ok: false, error: 'unauthorized' };
 
     try {
       const message = await this.chat.send(orderId, data.user.id, {

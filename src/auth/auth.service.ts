@@ -24,6 +24,8 @@ export interface AuthSession {
 
 const sha256 = (value: string) => createHash('sha256').update(value).digest('hex');
 
+export const SUSPENDED_MESSAGE = 'This account has been suspended. Contact support.';
+
 @Injectable()
 export class AuthService {
   constructor(
@@ -35,7 +37,8 @@ export class AuthService {
 
   async register(dto: RegisterDto): Promise<{ email: string }> {
     const existing = await this.userRepository.findOne({ where: { email: dto.email } });
-    if (existing?.emailVerified) {
+    // Admin accounts are only made with `pnpm admin:create`; never let sign-up touch one.
+    if (existing?.emailVerified || existing?.role === UserRole.ADMIN) {
       throw new ConflictException('An account with this email already exists. Sign in instead.');
     }
 
@@ -64,6 +67,9 @@ export class AuthService {
       throw new UnauthorizedException('No account found for this email. Sign up first.');
     }
     await this.otpService.verify(dto.email, dto.code, OtpPurpose.SIGNUP);
+    if (user.status !== 'active') {
+      throw new ForbiddenException({ code: 'ACCOUNT_SUSPENDED', message: SUSPENDED_MESSAGE });
+    }
     user.emailVerified = true;
     await this.userRepository.save(user);
     return this.issueSession(user);
@@ -81,7 +87,7 @@ export class AuthService {
       throw new UnauthorizedException('Incorrect email or password.');
     }
     if (user.status !== 'active') {
-      throw new ForbiddenException('This account has been suspended. Contact support.');
+      throw new ForbiddenException({ code: 'ACCOUNT_SUSPENDED', message: SUSPENDED_MESSAGE });
     }
     if (!user.emailVerified) {
       throw new ForbiddenException({
@@ -109,9 +115,13 @@ export class AuthService {
       .getOne();
 
     // A mismatch means the token was already rotated (possible replay) — end the session.
-    if (!user || user.refreshTokenHash !== sha256(refreshToken) || user.status !== 'active') {
+    if (!user || user.refreshTokenHash !== sha256(refreshToken)) {
       if (user) await this.userRepository.update(user.id, { refreshTokenHash: null });
       throw new UnauthorizedException('Your session has expired. Sign in again.');
+    }
+    if (user.status !== 'active') {
+      await this.userRepository.update(user.id, { refreshTokenHash: null });
+      throw new UnauthorizedException({ code: 'ACCOUNT_SUSPENDED', message: SUSPENDED_MESSAGE });
     }
     return this.issueSession(user);
   }

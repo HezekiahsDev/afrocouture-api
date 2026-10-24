@@ -5,6 +5,12 @@ import { LessThan, Repository } from 'typeorm';
 import type { Namespace } from 'socket.io';
 import { ChatMessage, ChatMessageType } from './entities/chat-message.entity.js';
 import { Order, OrderMilestone, OrderStatus } from '../orders/entities/order.entity.js';
+import { User } from '../users/entities/user.entity.js';
+import {
+  NOTIFICATION_CREATED,
+  NotificationsService,
+  type NotificationCreatedEvent,
+} from '../notifications/notifications.service.js';
 
 /** Payload of the in-process 'order.event' emitted by OrdersService (see docs/orders-payments-ai-contract.md). */
 export interface OrderEventPayload {
@@ -22,6 +28,10 @@ const MAX_LENGTH = 2000;
 const MAX_PAGE = 100;
 
 export const roomFor = (orderId: string) => `order:${orderId}`;
+/** Every socket joins its user's room so notifications reach all of that person's open tabs. */
+export const userRoom = (userId: string) => `user:${userId}`;
+/** In-process event: `{ userId }` — emit it whenever an account's status leaves 'active'. */
+export const USER_SUSPENDED = 'user.suspended';
 
 @Injectable()
 export class ChatService {
@@ -32,6 +42,8 @@ export class ChatService {
   constructor(
     @InjectRepository(ChatMessage) private readonly messages: Repository<ChatMessage>,
     @InjectRepository(Order) private readonly orders: Repository<Order>,
+    @InjectRepository(User) private readonly users: Repository<User>,
+    private readonly notifications: NotificationsService,
   ) {}
 
   attachServer(server: Namespace) {
@@ -54,7 +66,16 @@ export class ChatService {
     opts: { before?: string; limit?: number } = {},
   ): Promise<ChatMessage[]> {
     await this.requireMember(orderId, userId);
+    return this.page(orderId, opts);
+  }
 
+  /** Read-only view of an order's conversation for admins resolving a dispute (they never join it). */
+  async listForAdmin(orderId: string, opts: { before?: string; limit?: number } = {}): Promise<ChatMessage[]> {
+    if (!(await this.orders.exists({ where: { id: orderId } }))) throw new NotFoundException('Order not found.');
+    return this.page(orderId, opts);
+  }
+
+  private async page(orderId: string, opts: { before?: string; limit?: number }): Promise<ChatMessage[]> {
     const limit = Math.min(Math.max(Number(opts.limit) || 50, 1), MAX_PAGE);
     let before: Date | undefined;
     if (opts.before) {
@@ -100,7 +121,40 @@ export class ChatService {
       }),
     );
     this.broadcast(orderId, 'new_message', message);
+    void this.notifyRecipient(order, userId, content);
     return message;
+  }
+
+  /** Tells the other party about a message, unless they have this chat open right now. */
+  private async notifyRecipient(order: Order, senderId: string, content: string) {
+    const recipientId = senderId === order.customerId ? order.tailorUserId : order.customerId;
+    try {
+      const watching = (await this.server?.in(roomFor(order.id)).fetchSockets())?.some(
+        (s) => (s.data as { user?: User } | undefined)?.user?.id === recipientId,
+      );
+      if (watching) return;
+      const sender = await this.users.findOne({ where: { id: senderId }, select: { id: true, fullName: true } });
+      const who = sender?.fullName?.split(' ')[0] || (senderId === order.customerId ? 'Your customer' : 'Your artisan');
+      await this.notifications.notifyChat(recipientId, order.id, {
+        title: `New message from ${who} · ${order.reference}`,
+        body: content || 'Sent an image',
+        link: `/orders/${order.id}`,
+      });
+    } catch (err) {
+      this.logger.error(`Could not notify about a message on order ${order.id}`, err as Error);
+    }
+  }
+
+  /** Emitted when an admin suspends an account: close every socket that person has open. */
+  @OnEvent(USER_SUSPENDED)
+  disconnectUser({ userId }: { userId: string }): void {
+    this.server?.in(userRoom(userId)).disconnectSockets(true);
+  }
+
+  /** Pushes a new notification and the updated unread count to the person's open tabs. */
+  @OnEvent(NOTIFICATION_CREATED)
+  pushNotification({ notification, unreadCount }: NotificationCreatedEvent): void {
+    this.server?.to(userRoom(notification.userId)).emit('notification', { notification, unreadCount });
   }
 
   async postSystem(orderId: string, label: string): Promise<ChatMessage> {

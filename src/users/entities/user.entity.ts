@@ -35,6 +35,13 @@ export class User {
   @Column({ type: 'varchar', nullable: true, select: false })
   refreshTokenHash?: string | null;
 
+  /** When an admin suspended the account (cleared on reactivation). Admin-only, so not selected by default. */
+  @Column({ type: 'timestamptz', nullable: true, select: false })
+  suspendedAt?: Date | null;
+
+  @Column({ type: 'text', nullable: true, select: false })
+  suspensionReason?: string | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
 

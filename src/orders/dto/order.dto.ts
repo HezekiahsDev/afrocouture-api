@@ -1,4 +1,4 @@
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   IsArray,
@@ -6,6 +6,7 @@ import {
   IsDateString,
   IsIn,
   IsInt,
+  IsISO8601,
   IsOptional,
   IsString,
   IsUrl,
@@ -14,6 +15,7 @@ import {
   Max,
   MaxLength,
   Min,
+  MinLength,
   ValidateIf,
   ValidateNested,
 } from 'class-validator';
@@ -85,6 +87,26 @@ export class NoteDto {
 export class ApproveDto {
   @IsInt() @Min(1) @Max(5) rating: number;
   @IsOptional() @IsString() @MaxLength(1000) review?: string;
+}
+
+/** Rating a completed order after the fact (e.g. it was completed automatically). */
+export class ReviewDto {
+  @IsInt() @Min(1) @Max(5) rating: number;
+  @IsOptional() @IsString() @MaxLength(1000) review?: string;
+}
+
+export class ReviewReplyDto {
+  @IsString() @MinLength(2) @MaxLength(1000) reply: string;
+}
+
+export class HideReviewDto {
+  @IsBoolean() hidden: boolean;
+}
+
+export class ListReviewsQuery {
+  @IsOptional() @Transform(({ value }) => Number(value)) @IsInt() @Min(1) @Max(50) limit?: number;
+  /** ISO timestamp of the last review already shown. */
+  @IsOptional() @IsISO8601() before?: string;
 }
 
 export class ResolveDisputeDto {

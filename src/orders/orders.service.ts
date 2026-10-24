@@ -11,7 +11,7 @@ import { ConfigService } from '@nestjs/config';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { SchedulerRegistry } from '@nestjs/schedule';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, EntityManager, In, LessThan } from 'typeorm';
+import { Brackets, DataSource, EntityManager, In, IsNull, LessThan, Not } from 'typeorm';
 import { randomInt } from 'node:crypto';
 import { Order, OrderMilestone, OrderStatus, FitSnapshot } from './entities/order.entity.js';
 import { FabricFulfilment, OrderItem } from './entities/order-item.entity.js';
@@ -25,12 +25,15 @@ import {
   QuoteDto,
   ReasonDto,
   ResolveDisputeDto,
+  ReviewDto,
+  ReviewReplyDto,
 } from './dto/order.dto.js';
 import { sendOrderMail } from './orders-mail.js';
 import { EscrowService } from '../escrow/escrow.service.js';
 import { EscrowTransaction, EscrowTransactionStatus } from '../escrow/entities/escrow-transaction.entity.js';
 import { PaystackError, PaystackService } from '../payments/paystack.service.js';
 import { MailService } from '../mail/mail.service.js';
+import { NotificationsService } from '../notifications/notifications.service.js';
 import { User } from '../users/entities/user.entity.js';
 import { TailorProfile } from '../tailors/entities/tailor-profile.entity.js';
 import { MerchantProfile } from '../merchants/entities/merchant-profile.entity.js';
@@ -63,6 +66,9 @@ const MILESTONE_LABEL: Record<OrderMilestone, string> = {
 };
 const REF_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const naira = (n: number) => `₦${n.toLocaleString('en-NG')}`;
+/** Customers can rate an order for this long after it completes. */
+const REVIEW_WINDOW_DAYS = 60;
+const REVIEWABLE: OrderStatus[] = [OrderStatus.COMPLETED, OrderStatus.REFUNDED];
 const MEASUREMENTS = ['chest', 'shoulderWidth', 'sleeveLength', 'kaftanLength', 'waist', 'neck'] as const;
 
 @Injectable()
@@ -77,6 +83,7 @@ export class OrdersService implements OnModuleInit {
     private readonly escrow: EscrowService,
     private readonly paystack: PaystackService,
     private readonly mail: MailService,
+    private readonly notifications: NotificationsService,
     private readonly events: EventEmitter2,
     private readonly scheduler: SchedulerRegistry,
     private readonly config: ConfigService,
@@ -170,7 +177,7 @@ export class OrdersService implements OnModuleInit {
     void this.notifyUser(tailor.userId, `New commission request ${order.reference}`, [
       `${customer.fullName ?? 'A customer'} would like a ${order.garmentType}.`,
       'Review the brief and measurements, then send a quote or decline.',
-    ], order.id);
+    ], order.id, 'order_requested');
     return this.get(customer, order.id);
   }
 
@@ -229,7 +236,15 @@ export class OrdersService implements OnModuleInit {
         customer: { id: o.customerId, fullName: customers.get(o.customerId) ?? null },
         items,
       };
-      if (role === 'merchant') return { ...base, merchantTotal: items.reduce((s, i) => s + i.lineTotal, 0) };
+      // Merchants only need their fabric lines and the atelier — not who the customer is or what they asked for.
+      if (role === 'merchant') {
+        return {
+          ...base,
+          referenceImageUrls: [],
+          customer: { id: null, fullName: null },
+          merchantTotal: items.reduce((s, i) => s + i.lineTotal, 0),
+        };
+      }
       return { ...base, totalAmount: o.totalAmount, fabricTotal: o.fabricTotal };
     });
   }
@@ -275,7 +290,7 @@ export class OrdersService implements OnModuleInit {
     void this.notifyUser(order.customerId, `Your quote for ${order.reference} is ready`, [
       `Your artisan quoted ${naira(order.totalAmount)} for your ${order.garmentType}, ready by ${order.estimatedDeliveryDate}.`,
       'Pay to confirm — your payment is held until you approve the finished piece.',
-    ], order.id);
+    ], order.id, 'order_quoted');
     return this.get(user, id);
   }
 
@@ -294,7 +309,7 @@ export class OrdersService implements OnModuleInit {
     void this.notifyUser(order.customerId, `Your request ${order.reference} was declined`, [
       `Reason: ${order.declineReason}`,
       'You can browse other artisans and send a new request.',
-    ], order.id);
+    ], order.id, 'order_declined');
     return this.get(user, id);
   }
 
@@ -312,7 +327,7 @@ export class OrdersService implements OnModuleInit {
     this.flush(events);
     void this.notifyUser(order.tailorUserId, `Request ${order.reference} was cancelled`, [
       'The customer cancelled this commission request before paying.',
-    ], order.id);
+    ], order.id, 'order_cancelled');
     return this.get(user, id);
   }
 
@@ -407,6 +422,13 @@ export class OrdersService implements OnModuleInit {
     this.flush(events);
 
     if (mismatch) {
+      void this.notifications.notify(order.customerId, {
+        type: 'payment_refunded',
+        title: `Your payment for ${order.reference} is being refunded`,
+        body: `It didn't match the current quote. Paystack returns it to your card or account, usually within a few days.`,
+        link: `/orders/${order.id}`,
+        orderId: order.id,
+      });
       throw new ConflictException('That payment didn’t match the current quote, so it is being refunded. Please pay again.');
     }
     if (events.some((e) => e.type === 'paid')) void this.notifyPaid(order);
@@ -415,7 +437,7 @@ export class OrdersService implements OnModuleInit {
   // ───────────────────────── Production ─────────────────────────
 
   async advanceMilestone(user: User, id: string, dto: MilestoneDto) {
-    const { events } = await this.transaction(async (em, events) => {
+    const { order, events } = await this.transaction(async (em, events) => {
       const order = await this.lockOrder(em, id);
       this.assertTailor(order, user);
       this.assertStatus(order, [OrderStatus.PAID, OrderStatus.IN_PROGRESS], 'update');
@@ -432,6 +454,13 @@ export class OrdersService implements OnModuleInit {
       return order;
     });
     this.flush(events);
+    void this.notifications.notify(order.customerId, {
+      type: 'order_milestone',
+      title: `${MILESTONE_LABEL[dto.milestone]} · ${order.reference}`,
+      body: dto.note?.trim() || `Your artisan has moved your ${order.garmentType} to the next stage.`,
+      link: `/orders/${order.id}`,
+      orderId: order.id,
+    });
     return this.get(user, id);
   }
 
@@ -456,13 +485,13 @@ export class OrdersService implements OnModuleInit {
     void this.notifyUser(order.tailorUserId, `Fabric on its way for ${order.reference}`, [
       `${item.quantity} ${item.unit}${item.quantity === 1 ? '' : 's'} of ${item.fabricName} has been shipped to you.`,
       item.shippingNote ? `Shipping note: ${item.shippingNote}` : 'Mark it as received when it arrives.',
-    ], order.id);
+    ], order.id, 'fabric_shipped');
     return this.get(user, id);
   }
 
   async receiveItem(user: User, id: string, itemId: string) {
     const payouts: EscrowTransaction[] = [];
-    const { events } = await this.transaction(async (em, events) => {
+    const { order, events } = await this.transaction(async (em, events) => {
       const order = await this.lockOrder(em, id);
       this.assertTailor(order, user);
       const item = await em.findOne(OrderItem, { where: { id: itemId, orderId: id } });
@@ -494,6 +523,7 @@ export class OrdersService implements OnModuleInit {
     });
     for (const p of payouts) await this.escrow.execute(p);
     this.flush(events);
+    for (const payout of payouts) void this.notifyMerchantPaid(order, payout);
     return this.get(user, id);
   }
 
@@ -516,7 +546,7 @@ export class OrdersService implements OnModuleInit {
     void this.notifyUser(order.customerId, `Your ${order.garmentType} has been delivered`, [
       'Check it over. When you’re happy, approve the order to release payment to your artisan.',
       'If something is wrong, open a dispute from the order page instead.',
-    ], order.id);
+    ], order.id, 'order_delivered');
     return this.get(user, id);
   }
 
@@ -528,15 +558,16 @@ export class OrdersService implements OnModuleInit {
       this.assertStatus(order, [OrderStatus.DELIVERED], 'approve');
       order.rating = dto.rating;
       order.review = dto.review?.trim() || null;
+      order.reviewedAt = new Date();
       await this.completeOrder(em, events, order, payouts, user.id, 'completed', 'Order approved — payment released to the artisan');
-      await this.applyRating(em, order.tailorId, dto.rating);
+      await this.recomputeRating(em, order.tailorId);
       return order;
     });
     for (const p of payouts) await this.escrow.execute(p);
     this.flush(events);
     void this.notifyUser(order.tailorUserId, `Order ${order.reference} approved`, [
       `The customer approved the order and rated it ${dto.rating}/5. Your payout is on its way.`,
-    ], order.id);
+    ], order.id, 'order_completed');
     return this.get(user, id);
   }
 
@@ -556,21 +587,185 @@ export class OrdersService implements OnModuleInit {
     void this.notifyUser(order.tailorUserId, `A dispute was opened on ${order.reference}`, [
       `Reason: ${order.disputeReason}`,
       'Payment stays in escrow while our team reviews it. Reply in the order chat with anything that helps.',
-    ], order.id);
+    ], order.id, 'order_disputed');
+    void this.notifications.notifyAdmins({
+      type: 'admin_dispute',
+      title: `Dispute opened on ${order.reference}`,
+      body: order.disputeReason,
+      link: `/admin/orders/${order.id}`,
+      orderId: order.id,
+    });
     return this.get(user, id);
+  }
+
+  // ───────────────────────── Reviews ─────────────────────────
+
+  /** Rate an order after it finished without one (auto-completed, or settled by our team). */
+  async review(user: User, id: string, dto: ReviewDto) {
+    const order = await this.dataSource.transaction(async (em) => {
+      const order = await this.lockOrder(em, id);
+      this.assertCustomer(order, user);
+      this.assertStatus(order, REVIEWABLE, 'review');
+      if (order.rating !== null) throw new ConflictException('You have already reviewed this order.');
+      const finished = order.completedAt ?? order.updatedAt;
+      if (Date.now() - finished.getTime() > REVIEW_WINDOW_DAYS * 24 * 60 * 60 * 1000) {
+        throw new ConflictException(`Reviews can be left up to ${REVIEW_WINDOW_DAYS} days after an order completes.`);
+      }
+      order.rating = dto.rating;
+      order.review = dto.review?.trim() || null;
+      order.reviewedAt = new Date();
+      await em.save(order);
+      await this.recomputeRating(em, order.tailorId);
+      return order;
+    });
+    void this.notifications.notify(order.tailorUserId, {
+      type: 'review',
+      title: `New ${order.rating}-star review · ${order.reference}`,
+      body: order.review ?? `Your customer rated their ${order.garmentType}.`,
+      link: `/orders/${order.id}#review`,
+      orderId: order.id,
+    });
+    return this.get(user, id);
+  }
+
+  async replyToReview(user: User, id: string, dto: ReviewReplyDto) {
+    const order = await this.dataSource.transaction(async (em) => {
+      const order = await this.lockOrder(em, id);
+      this.assertTailor(order, user);
+      if (order.rating === null) throw new ConflictException('There is no review to reply to yet.');
+      if (order.reviewReply) throw new ConflictException('You have already replied to this review.');
+      order.reviewReply = dto.reply.trim();
+      order.reviewRepliedAt = new Date();
+      return em.save(order);
+    });
+    void this.notifications.notify(order.customerId, {
+      type: 'review_reply',
+      title: `Your artisan replied to your review · ${order.reference}`,
+      body: order.reviewReply,
+      link: `/orders/${order.id}#review`,
+      orderId: order.id,
+    });
+    return this.get(user, id);
+  }
+
+  /** Public reviews for an artisan's profile, newest first, with the rating breakdown. */
+  async listReviews(tailorId: string, query: { limit?: number; before?: string }) {
+    const tailor = await this.dataSource.getRepository(TailorProfile).findOne({
+      where: { id: tailorId, kycStatus: KycStatus.APPROVED },
+      select: { id: true, rating: true, reviewCount: true },
+    });
+    if (!tailor) throw new NotFoundException('This artisan could not be found.');
+    const limit = query.limit ?? 10;
+    const visible = { tailorId, rating: Not(IsNull()), reviewHiddenAt: IsNull() };
+    const orders = await this.dataSource.getRepository(Order).find({
+      where: query.before ? { ...visible, reviewedAt: LessThan(new Date(query.before)) } : visible,
+      order: { reviewedAt: 'DESC' },
+      take: limit + 1,
+      select: { id: true, customerId: true, garmentType: true, rating: true, review: true, reviewedAt: true, reviewReply: true, reviewRepliedAt: true },
+    });
+    const names = await this.userNames(orders.map((o) => o.customerId));
+    const breakdown = await this.dataSource
+      .getRepository(Order)
+      .createQueryBuilder('o')
+      .select('o.rating', 'rating')
+      .addSelect('COUNT(*)', 'count')
+      .where('o.tailorId = :tailorId AND o.rating IS NOT NULL AND o.reviewHiddenAt IS NULL', { tailorId })
+      .groupBy('o.rating')
+      .getRawMany<{ rating: number; count: string }>();
+    return {
+      rating: tailor.rating === null ? null : Number(tailor.rating),
+      reviewCount: tailor.reviewCount,
+      breakdown: Object.fromEntries([5, 4, 3, 2, 1].map((r) => [r, Number(breakdown.find((b) => Number(b.rating) === r)?.count ?? 0)])),
+      items: orders.slice(0, limit).map((o) => ({
+        id: o.id,
+        rating: o.rating,
+        review: o.review,
+        garmentType: o.garmentType,
+        reviewerName: shortName(names.get(o.customerId)),
+        reviewedAt: o.reviewedAt,
+        reply: o.reviewReply,
+        repliedAt: o.reviewRepliedAt,
+      })),
+      hasMore: orders.length > limit,
+    };
   }
 
   // ───────────────────────── Admin ─────────────────────────
 
-  async listForAdmin(status: OrderStatus) {
+  /** Recent reviews for moderation, newest first. */
+  async listReviewsForAdmin(query: { limit?: number; before?: string }) {
+    const limit = query.limit ?? 30;
+    const reviewed = { rating: Not(IsNull()) };
     const orders = await this.dataSource.getRepository(Order).find({
-      where: { status },
-      relations: { items: true },
-      order: { updatedAt: 'ASC' },
+      where: query.before ? { ...reviewed, reviewedAt: LessThan(new Date(query.before)) } : reviewed,
+      order: { reviewedAt: 'DESC' },
+      take: limit + 1,
+      select: {
+        id: true, reference: true, customerId: true, tailorId: true, garmentType: true, rating: true, review: true,
+        reviewedAt: true, reviewReply: true, reviewHiddenAt: true,
+      },
     });
     const tailors = await this.tailorSummaries(orders.map((o) => o.tailorId));
     const customers = await this.userNames(orders.map((o) => o.customerId));
-    return Promise.all(
+    return {
+      items: orders.slice(0, limit).map((o) =>
+        Object.assign({}, o, {
+          tailor: tailors.get(o.tailorId) ?? null,
+          customer: { id: o.customerId, fullName: customers.get(o.customerId) ?? null },
+        }),
+      ),
+      hasMore: orders.length > limit,
+    };
+  }
+
+  async setReviewHidden(id: string, hidden: boolean) {
+    return this.dataSource.transaction(async (em) => {
+      const order = await this.lockOrder(em, id);
+      if (order.rating === null) throw new NotFoundException('This order has no review.');
+      order.reviewHiddenAt = hidden ? (order.reviewHiddenAt ?? new Date()) : null;
+      await em.save(order);
+      await this.recomputeRating(em, order.tailorId);
+      return { id: order.id, reviewHiddenAt: order.reviewHiddenAt };
+    });
+  }
+
+
+  /**
+   * Every order for the admin console, newest first. `statuses` empty = all; `q` matches the
+   * reference, the customer's name or email, or the artisan's name.
+   */
+  async listForAdmin(opts: { statuses?: OrderStatus[]; q?: string; page?: number; limit?: number } = {}) {
+    const page = opts.page ?? 1;
+    const limit = opts.limit ?? 20;
+    const qb = this.dataSource
+      .getRepository(Order)
+      .createQueryBuilder('o')
+      .leftJoinAndSelect('o.items', 'items')
+      .leftJoin(User, 'cu', 'cu.id = o.customerId')
+      .leftJoin(TailorProfile, 'tp', 'tp.id = o.tailorId');
+    if (opts.statuses?.length) qb.andWhere('o.status IN (:...statuses)', { statuses: opts.statuses });
+    if (opts.q?.trim()) {
+      const like = `%${opts.q.trim()}%`;
+      qb.andWhere(
+        new Brackets((w) =>
+          w
+            .where('o.reference ILIKE :like', { like })
+            .orWhere('cu.fullName ILIKE :like', { like })
+            .orWhere('cu.email ILIKE :like', { like })
+            .orWhere('tp.displayName ILIKE :like', { like })
+            .orWhere('tp.atelierName ILIKE :like', { like }),
+        ),
+      );
+    }
+    const [orders, total] = await qb
+      .orderBy('o.createdAt', 'DESC')
+      .addOrderBy('o.id', 'DESC')
+      .skip((page - 1) * limit)
+      .take(limit)
+      .getManyAndCount();
+    const tailors = await this.tailorSummaries(orders.map((o) => o.tailorId));
+    const customers = await this.userNames(orders.map((o) => o.customerId));
+    const items = await Promise.all(
       orders.map(async (o) =>
         Object.assign({}, o, {
           tailor: tailors.get(o.tailorId) ?? null,
@@ -579,10 +774,11 @@ export class OrdersService implements OnModuleInit {
         }),
       ),
     );
+    return { items, total, page, limit };
   }
 
   /** Escrow transactions in a status (default: failed payouts) with the order and payee they belong to. */
-  async escrowQueue(status: EscrowTransactionStatus) {
+  async escrowQueue(status: EscrowTransactionStatus | 'all') {
     const txs = await this.escrow.listByStatus(status);
     const orders = await this.dataSource
       .getRepository(Order)
@@ -638,8 +834,8 @@ export class OrdersService implements OnModuleInit {
     for (const t of transfers) await this.escrow.execute(t);
     this.flush(events);
     const lines = [`Our team resolved the dispute on ${order.reference}.`, `Decision: ${order.resolutionNote}`];
-    void this.notifyUser(order.customerId, `Dispute resolved — ${order.reference}`, lines, order.id);
-    void this.notifyUser(order.tailorUserId, `Dispute resolved — ${order.reference}`, lines, order.id);
+    void this.notifyUser(order.customerId, `Dispute resolved — ${order.reference}`, lines, order.id, 'order_resolved');
+    void this.notifyUser(order.tailorUserId, `Dispute resolved — ${order.reference}`, lines, order.id, 'order_resolved');
     return this.get(admin, id);
   }
 
@@ -664,7 +860,14 @@ export class OrdersService implements OnModuleInit {
       this.flush(events);
       if (order.status === OrderStatus.COMPLETED) {
         completed++;
-        void this.notifyUser(order.tailorUserId, `Order ${order.reference} completed`, ['The order was completed automatically and your payout is on its way.'], order.id);
+        void this.notifyUser(order.tailorUserId, `Order ${order.reference} completed`, ['The order was completed automatically and your payout is on its way.'], order.id, 'order_completed');
+        void this.notifications.notify(order.customerId, {
+          type: 'order_completed',
+          title: `Order ${order.reference} is complete`,
+          body: `How was your ${order.garmentType}? Rate your artisan to help other customers.`,
+          link: `/orders/${order.id}#review`,
+          orderId: order.id,
+        });
       }
     }
     return completed;
@@ -727,13 +930,34 @@ export class OrdersService implements OnModuleInit {
     if (payout) payouts.push(payout);
   }
 
-  private async applyRating(em: EntityManager, tailorId: string, rating: number) {
-    const tailor = await em.findOne(TailorProfile, { where: { id: tailorId } });
-    if (!tailor) return;
-    const count = tailor.reviewCount ?? 0;
-    const current = tailor.rating === null ? 0 : Number(tailor.rating);
-    const next = (current * count + rating) / (count + 1);
-    await em.update(TailorProfile, tailorId, { rating: next.toFixed(1), reviewCount: count + 1 });
+  /** Sets the artisan's average and count from their visible reviews (sample artisans keep their seeded figures). */
+  private async recomputeRating(em: EntityManager, tailorId: string) {
+    const tailor = await em.findOne(TailorProfile, { where: { id: tailorId }, select: { id: true, isSample: true } });
+    if (!tailor || tailor.isSample) return;
+    const row = await em
+      .createQueryBuilder(Order, 'o')
+      .select('AVG(o.rating)', 'avg')
+      .addSelect('COUNT(*)', 'count')
+      .where('o.tailorId = :tailorId', { tailorId })
+      .andWhere('o.rating IS NOT NULL')
+      .andWhere('o.reviewHiddenAt IS NULL')
+      .getRawOne<{ avg: string | null; count: string }>();
+    const count = Number(row?.count ?? 0);
+    await em.update(TailorProfile, tailorId, {
+      rating: count ? Number(row!.avg).toFixed(1) : null,
+      reviewCount: count,
+    });
+  }
+
+  private async notifyMerchantPaid(order: Order, payout: EscrowTransaction) {
+    const merchant = await this.dataSource.getRepository(MerchantProfile).findOne({ where: { id: payout.partyId }, select: { id: true, userId: true } });
+    await this.notifications.notify(merchant?.userId, {
+      type: 'payout',
+      title: `Fabric received · ${order.reference}`,
+      body: `The artisan confirmed your fabric arrived. ${naira(payout.amount)} is on its way to your bank account.`,
+      link: `/orders/${order.id}`,
+      orderId: order.id,
+    });
   }
 
   private async buildItems(
@@ -885,7 +1109,9 @@ export class OrdersService implements OnModuleInit {
     return map;
   }
 
-  private async notifyUser(userId: string, subject: string, lines: string[], orderId: string) {
+  /** Emails the person and adds the same update to their notification centre. */
+  private async notifyUser(userId: string, subject: string, lines: string[], orderId: string, type: string) {
+    void this.notifications.notify(userId, { type, title: subject, body: lines[0], link: `/orders/${orderId}`, orderId });
     const user = await this.dataSource.getRepository(User).findOne({ where: { id: userId } });
     await sendOrderMail(this.mail, user?.email, subject, lines, `${this.frontendUrl}/orders/${orderId}`);
   }
@@ -894,7 +1120,7 @@ export class OrdersService implements OnModuleInit {
     await this.notifyUser(order.tailorUserId, `Payment received for ${order.reference}`, [
       `The customer paid ${naira(order.totalAmount)}; it is held in escrow until they approve the finished piece.`,
       'You can start work. Update the milestones as you go.',
-    ], order.id);
+    ], order.id, 'order_paid');
 
     const items = await this.dataSource.getRepository(OrderItem).find({ where: { orderId: order.id } });
     if (!items.length) return;
@@ -908,7 +1134,7 @@ export class OrdersService implements OnModuleInit {
         ...mine.map((i) => `• ${i.quantity} ${i.unit}${i.quantity === 1 ? '' : 's'} of ${i.fabricName}`),
         `Ship to: ${workshop?.atelierName ?? 'the atelier'}, ${workshop?.workshopAddress ?? ''}${workshop?.city ? `, ${workshop.city}` : ''}`,
         'You are paid once the artisan confirms the fabric has arrived.',
-      ], order.id);
+      ], order.id, 'fabric_order');
     }
   }
 }
@@ -919,4 +1145,11 @@ function safeJson(value: string): { orderId?: string } | null {
   } catch {
     return null;
   }
+}
+
+/** "Adaeze Okafor" → "Adaeze O." — reviews show first name and initial only. */
+function shortName(fullName: string | null | undefined): string {
+  const parts = (fullName ?? '').trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return 'AfroCouture customer';
+  return parts.length > 1 ? `${parts[0]} ${parts[parts.length - 1][0].toUpperCase()}.` : parts[0];
 }

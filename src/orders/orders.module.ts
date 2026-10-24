@@ -4,7 +4,7 @@ import { Order } from './entities/order.entity.js';
 import { OrderItem } from './entities/order-item.entity.js';
 import { OrderEvent } from './entities/order-event.entity.js';
 import { OrdersService } from './orders.service.js';
-import { OrdersController } from './orders.controller.js';
+import { OrdersController, TailorReviewsController } from './orders.controller.js';
 import { PaystackWebhookController } from './paystack-webhook.controller.js';
 import { EscrowModule } from '../escrow/escrow.module.js';
 import { PaymentsModule } from '../payments/payments.module.js';
@@ -35,7 +35,7 @@ import { User } from '../users/entities/user.entity.js';
     EscrowModule,
     PaymentsModule,
   ],
-  controllers: [OrdersController, PaystackWebhookController],
+  controllers: [OrdersController, TailorReviewsController, PaystackWebhookController],
   providers: [OrdersService],
   exports: [OrdersService],
 })

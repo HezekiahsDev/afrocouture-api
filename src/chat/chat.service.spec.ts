@@ -25,11 +25,16 @@ function setup(status: OrderStatus = OrderStatus.PAID, orderExists = true) {
     find: vi.fn(async () => [{ id: 'm2' }, { id: 'm1' }] as ChatMessage[]),
   };
   const emit = vi.fn();
-  const server = { to: vi.fn(() => ({ emit })) };
-  const service = new ChatService(messages as any, orders as any);
+  const watchers: { data: { user: { id: string } } }[] = [];
+  const server = { to: vi.fn(() => ({ emit })), in: vi.fn(() => ({ fetchSockets: vi.fn(async () => watchers) })) };
+  const users = { findOne: vi.fn(async () => ({ id: CUSTOMER, fullName: 'Adaeze Okafor' })) };
+  const notifications = { notifyChat: vi.fn(async () => undefined) };
+  const service = new ChatService(messages as any, orders as any, users as any, notifications as any);
   service.attachServer(server as any);
-  return { service, saved, messages, orders, server, emit };
+  return { service, saved, messages, orders, server, emit, watchers, notifications };
 }
+
+const flush = () => new Promise((resolve) => setImmediate(resolve));
 
 describe('ChatService', () => {
   describe('membership', () => {
@@ -133,6 +138,34 @@ describe('ChatService', () => {
       const { service, messages } = setup();
       messages.save.mockRejectedValueOnce(new Error('db down'));
       await expect(service.handleOrderEvent(event)).resolves.toBeUndefined();
+    });
+  });
+
+  describe('notifications', () => {
+    it('notifies the other party about a new message', async () => {
+      const { service, notifications } = setup();
+      await service.send(ORDER, CUSTOMER, { content: 'Can we move the fitting to Friday?' });
+      await flush();
+      expect(notifications.notifyChat).toHaveBeenCalledWith(TAILOR, ORDER, expect.objectContaining({
+        title: expect.stringContaining('Adaeze'),
+        body: 'Can we move the fitting to Friday?',
+        link: `/orders/${ORDER}`,
+      }));
+    });
+
+    it('stays quiet while the recipient has the chat open', async () => {
+      const { service, notifications, watchers } = setup();
+      watchers.push({ data: { user: { id: TAILOR } } });
+      await service.send(ORDER, CUSTOMER, { content: 'Hello' });
+      await flush();
+      expect(notifications.notifyChat).not.toHaveBeenCalled();
+    });
+
+    it('pushes new notifications to the person’s own room', () => {
+      const { service, server, emit } = setup();
+      service.pushNotification({ notification: { userId: TAILOR } as any, unreadCount: 3 });
+      expect(server.to).toHaveBeenCalledWith(`user:${TAILOR}`);
+      expect(emit).toHaveBeenCalledWith('notification', expect.objectContaining({ unreadCount: 3 }));
     });
   });
 });

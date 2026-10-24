@@ -8,6 +8,7 @@ import { User } from '../users/entities/user.entity.js';
 import { MailService } from '../mail/mail.service.js';
 import { ReviewDecisionDto } from '../common/dto/review.dto.js';
 import { sendReviewOutcome } from '../common/review-mail.js';
+import { NotificationsService } from '../notifications/notifications.service.js';
 import { definedOnly } from '../common/defined-only.js';
 import { PAYOUT_FIELDS, notifyPayoutAccountChanged, resetRecipientIfChanged } from '../common/payout-account.js';
 
@@ -87,6 +88,7 @@ export class TailorsService {
     @InjectRepository(User)
     private readonly userRepository: Repository<User>,
     private readonly mail: MailService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   // ── Public directory ──
@@ -179,7 +181,14 @@ export class TailorsService {
     profile.kycStatus = KycStatus.PENDING;
     profile.submittedAt = new Date();
     profile.reviewNote = null;
-    return this.tailorRepository.save(profile);
+    const saved = await this.tailorRepository.save(profile);
+    void this.notifications.notifyAdmins({
+      type: 'admin_verification',
+      title: `Artisan verification submitted`,
+      body: `${profile.atelierName ?? profile.displayName ?? 'An artisan'} is waiting for review.`,
+      link: '/admin',
+    });
+    return saved;
   }
 
   // ── Admin ──
@@ -202,6 +211,14 @@ export class TailorsService {
     const saved = await this.tailorRepository.save(profile);
 
     const owner = profile.userId ? await this.userRepository.findOne({ where: { id: profile.userId } }) : null;
+    void this.notifications.notify(profile.userId, {
+      type: 'verification',
+      title: approved ? 'You’re verified' : 'Your verification needs changes',
+      body: approved
+        ? 'Your atelier is now live in the artisan directory.'
+        : (profile.reviewNote ?? 'Open your verification to see what to change.'),
+      link: '/onboarding/tailor-kyc',
+    });
     if (owner) await sendReviewOutcome(this.mail, owner.email, 'artisan', approved, profile.reviewNote);
     return saved;
   }

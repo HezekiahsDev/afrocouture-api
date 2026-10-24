@@ -12,15 +12,13 @@ import {
   ParseEnumPipe,
   ParseUUIDPipe,
   Put,
-  UseGuards,
-} from '@nestjs/common';
+  } from '@nestjs/common';
 import { InjectRepository, TypeOrmModule } from '@nestjs/typeorm';
 import { IsInt, IsOptional, Max, Min } from 'class-validator';
 import { Repository } from 'typeorm';
 import { SavedItem, SavedItemType } from './entities/saved-item.entity.js';
 import { TailorProfile } from '../tailors/entities/tailor-profile.entity.js';
 import { Fabric } from '../fabrics/entities/fabric.entity.js';
-import { JwtAuthGuard } from '../common/guards/jwt-auth.guard.js';
 import { CurrentUser } from '../common/decorators/current-user.decorator.js';
 import { User } from '../users/entities/user.entity.js';
 
@@ -63,7 +61,6 @@ export class SavedItemsService {
 }
 
 @Controller('saved')
-@UseGuards(JwtAuthGuard)
 export class SavedItemsController {
   constructor(private readonly savedItems: SavedItemsService) {}
 

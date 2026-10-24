@@ -10,17 +10,14 @@ import {
   Patch,
   Post,
   Query,
-  UseGuards,
-} from '@nestjs/common';
+  } from '@nestjs/common';
 import { AiStudioService } from './ai-studio.service.js';
 import { GenerateDesignDto, ListDesignsQuery, UpdateDesignDto } from './dto/ai-studio.dto.js';
-import { JwtAuthGuard } from '../common/guards/jwt-auth.guard.js';
 import { CurrentUser } from '../common/decorators/current-user.decorator.js';
 import { RateLimit } from '../common/rate-limit/rate-limit.js';
 import { User } from '../users/entities/user.entity.js';
 
 @Controller('ai-studio')
-@UseGuards(JwtAuthGuard)
 export class AiStudioController {
   constructor(private readonly aiStudio: AiStudioService) {}
 

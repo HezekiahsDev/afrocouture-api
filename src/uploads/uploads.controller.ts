@@ -1,35 +1,37 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Controller,
   Post,
   Query,
   UploadedFile,
-  UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { JwtAuthGuard } from '../common/guards/jwt-auth.guard.js';
 import { CurrentUser } from '../common/decorators/current-user.decorator.js';
 import { User } from '../users/entities/user.entity.js';
 import { CloudinaryService } from './cloudinary.service.js';
 import { RateLimit } from '../common/rate-limit/rate-limit.js';
+import { UserRole } from '../types/index.js';
 
 const MAX_BYTES = 10 * 1024 * 1024;
 const IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 const DOCUMENT_TYPES = [...IMAGE_TYPES, 'application/pdf'];
 
-/** What each upload is for decides where it is stored and which file types are accepted. */
-const PURPOSES: Record<string, string[]> = {
-  'tailor-kyc': DOCUMENT_TYPES,
-  'tailor-portfolio': IMAGE_TYPES,
-  'merchant-verification': DOCUMENT_TYPES,
-  'fit-photo': IMAGE_TYPES,
-  fabric: IMAGE_TYPES,
-  chat: IMAGE_TYPES,
+/**
+ * What each upload is for decides where it is stored, which file types are accepted and
+ * which roles may upload it (chat also covers a customer's reference images on a request).
+ */
+const PURPOSES: Record<string, { types: string[]; roles: UserRole[] }> = {
+  'tailor-kyc': { types: DOCUMENT_TYPES, roles: [UserRole.TAILOR] },
+  'tailor-portfolio': { types: IMAGE_TYPES, roles: [UserRole.TAILOR] },
+  'merchant-verification': { types: DOCUMENT_TYPES, roles: [UserRole.MERCHANT] },
+  'fit-photo': { types: IMAGE_TYPES, roles: [UserRole.CUSTOMER] },
+  fabric: { types: IMAGE_TYPES, roles: [UserRole.MERCHANT] },
+  chat: { types: IMAGE_TYPES, roles: [UserRole.CUSTOMER, UserRole.TAILOR] },
 };
 
 @Controller('uploads')
-@UseGuards(JwtAuthGuard)
 export class UploadsController {
   constructor(private readonly cloudinary: CloudinaryService) {}
 
@@ -41,10 +43,14 @@ export class UploadsController {
     @UploadedFile() file: Express.Multer.File | undefined,
     @Query('purpose') purpose = '',
   ) {
-    const allowed = PURPOSES[purpose];
-    if (!allowed) {
+    const rule = PURPOSES[purpose];
+    if (!rule) {
       throw new BadRequestException(`Unknown upload purpose. Use one of: ${Object.keys(PURPOSES).join(', ')}.`);
     }
+    if (!rule.roles.includes(user.role)) {
+      throw new ForbiddenException("Your account can't upload files for this.");
+    }
+    const allowed = rule.types;
     if (!file) {
       throw new BadRequestException('Attach a file in the "file" field.');
     }

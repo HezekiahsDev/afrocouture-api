@@ -1,12 +1,14 @@
-import { Body, Controller, Get, Put, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Put } from '@nestjs/common';
 import { MeasurementsService } from './measurements.service.js';
 import { SaveMeasurementsDto } from './dto/save-measurements.dto.js';
-import { JwtAuthGuard } from '../common/guards/jwt-auth.guard.js';
 import { CurrentUser } from '../common/decorators/current-user.decorator.js';
 import { User } from '../users/entities/user.entity.js';
+import { Roles } from '../common/decorators/roles.decorator.js';
+import { UserRole } from '../types/index.js';
 
+/** A customer's own fit profile; artisans see a snapshot of it on each order instead. */
 @Controller('measurements/me')
-@UseGuards(JwtAuthGuard)
+@Roles(UserRole.CUSTOMER)
 export class MeasurementsController {
   constructor(private readonly measurementsService: MeasurementsService) {}
 

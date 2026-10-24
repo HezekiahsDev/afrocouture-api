@@ -68,6 +68,10 @@ pnpm admin:create admin@example.com 'a-long-password' "Full Name"
 
 Admins review artisan and merchant verification through `GET /admin/verifications` and `PATCH /admin/{tailors|merchants}/:id/review` (`{ "decision": "approve" | "reject", "note": "…" }` — a note is required to reject and is emailed to the applicant).
 
+The admin console API (`/admin/*`, admins only) also covers an overview dashboard, user search with
+suspend/reactivate, all orders with read-only chat, payouts, review and fabric moderation, and an audit
+log of every admin action (`GET /admin/audit`). The route list is in [docs/rbac.md](docs/rbac.md#admin).
+
 ## Environment
 
 See `.env.example`. Beyond the database and JWT secrets:
@@ -107,6 +111,91 @@ pnpm test          # Unit tests (Vitest)
 pnpm build         # Production TypeScript build
 pnpm lint          # Static analysis (Oxlint)
 ```
+
+### Integration (e2e) tests
+
+`pnpm test:e2e` boots the whole API in-process and drives it over HTTP with supertest
+(`test/*.e2e-spec.ts`). `test/rbac.e2e-spec.ts` is the access-control matrix from
+[docs/rbac.md](docs/rbac.md): every protected route answers 401 without a token, 403 for the wrong
+role, 403/404 for someone else's resource, and 2xx for the right person, with no private fields leaking.
+`test/admin.e2e-spec.ts` covers the admin console and its audit trail, and
+`test/reviews-notifications.e2e-spec.ts` runs real orders end to end (Paystack replaced by an
+in-process fake) to check reviews, replies, moderation, the notification centre and the live
+socket push (using `socket.io-client` from `../afrocouture-web` when present; otherwise that test is skipped).
+Each suite clears the database and the `rl:*` rate-limit keys in its Redis DB before it starts.
+
+The suites **truncate every table**, so they refuse to start unless `DB_NAME` looks disposable
+(contains `test`, `e2e` or `_b<digit>`, or `E2E_ALLOW_TRUNCATE=1`). Use a separate database and
+Redis DB; environment variables override `.env`:
+
+```bash
+docker compose exec postgres psql -U "$DB_USER" -d postgres -c 'CREATE DATABASE afrocouture_test'
+pnpm build
+DB_NAME=afrocouture_test pnpm migration:run   # once, and after new migrations
+DB_NAME=afrocouture_test REDIS_DB=15 MAIL_HOST= pnpm test:e2e   # all suites, one file at a time
+```
+
+Never point them at the production database.
+
+## Operations: logs, alerts, health, backups
+
+### Logs
+Every request gets an id, returned in the `X-Request-Id` header and in error responses (`requestId`), and
+logged with method, path (no query string), status, duration and the signed-in user. Logs are JSON lines
+when `NODE_ENV=production` or `LOG_FORMAT=json`, otherwise readable text. On the server:
+
+```bash
+pm2 logs afrocouture-api                                  # live
+pm2 logs afrocouture-api --nostream --lines 500 | grep <requestId>
+```
+
+### Alerts
+Unexpected errors (any 500 or crash), unhandled promise rejections, and failed or reversed payouts and
+refunds raise an alert. Set `ALERT_EMAIL` (comma-separated) and/or `ALERT_WEBHOOK_URL` (Slack or Discord
+incoming webhook). Repeats of the same alert are suppressed for `ALERT_THROTTLE_MINUTES` (default 15).
+Deliberate 4xx/502/503 responses (bad input, a provider down, a feature switched off) are logged only.
+With neither variable set, alerts only go to the log.
+
+### Health
+`GET /health` returns `200 {"status":"ok","db":"up","redis":"up",...}`, or `503` with `"status":"degraded"`
+when Postgres or Redis doesn't answer within 2s / 1s. Point an uptime monitor (UptimeRobot, Better Stack,
+Cloudflare Health Checks) at `https://afrocouture-api.alcance.ng/health`, checking every 1–5 minutes and
+alerting on any non-200.
+
+### Database backups
+`scripts/backup-db.sh` dumps the database from the Postgres container (`pg_dump` custom format), checks the
+dump is readable, writes it to `BACKUP_DIR` (default `~/backups/afrocouture`), and deletes dumps older than
+`BACKUP_KEEP_DAYS` (default 14). With `BACKUP_RCLONE_REMOTE` set it also copies each dump off the server
+(recommended: a backup on the same VPS doesn't survive losing the VPS). A failed backup exits non-zero
+and posts to `ALERT_WEBHOOK_URL`.
+
+On the server, once:
+
+```bash
+cd /home/alcance/projects/afrocouture-api   # DEPLOY_PATH
+bash scripts/backup-db.sh                 # take one now and check the output
+bash scripts/install-backup-cron.sh       # daily at 02:30 server time; logs to $BACKUP_DIR/backup.log
+crontab -l                                # confirm the "# afrocouture-db-backup" line
+```
+
+Change the schedule with `BACKUP_CRON="0 */6 * * *" bash scripts/install-backup-cron.sh`; remove it with
+`bash scripts/install-backup-cron.sh --remove`.
+
+Restoring replaces every table in the target database, in one transaction:
+
+```bash
+# Rehearse into a scratch database first (created if missing), then drop it:
+bash scripts/restore-db.sh ~/backups/afrocouture/afrocouture-YYYYMMDD-HHMMSS.dump afrocouture_restore_check
+docker compose exec postgres dropdb -U afrocouture afrocouture_restore_check
+
+# Real restore over the live database:
+pm2 stop afrocouture-api
+bash scripts/restore-db.sh ~/backups/afrocouture/afrocouture-YYYYMMDD-HHMMSS.dump
+pm2 start afrocouture-api
+```
+
+The scripts read `DB_NAME`, `DB_USER` and `DB_PASSWORD` from `.env` and run the Postgres tools inside the
+`postgres` compose service (or `PG_CONTAINER=<name>` for a standalone container).
 
 ## Deployment
 

@@ -73,6 +73,14 @@ export class Fabric {
   @Column({ type: 'boolean', default: false })
   isSample: boolean;
 
+  /** Set when an admin unpublished the listing; the merchant can't republish it while set. */
+  @Column({ type: 'timestamptz', nullable: true })
+  moderatedAt: Date | null;
+
+  /** The admin's reason, shown to the merchant. */
+  @Column({ type: 'text', nullable: true })
+  unpublishedReason: string | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
 

@@ -2,6 +2,7 @@ import { Controller, Get, Injectable, Module } from '@nestjs/common';
 import { InjectRepository, TypeOrmModule } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Style } from './entities/style.entity.js';
+import { Public } from '../common/decorators/public.decorator.js';
 
 @Injectable()
 export class StylesService {
@@ -15,6 +16,7 @@ export class StylesService {
   }
 }
 
+@Public()
 @Controller('styles')
 export class StylesController {
   constructor(private readonly stylesService: StylesService) {}

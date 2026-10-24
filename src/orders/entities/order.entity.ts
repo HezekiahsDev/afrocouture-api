@@ -173,12 +173,26 @@ export class Order {
   @Column({ type: 'text', nullable: true })
   resolutionNote: string | null;
 
-  /** Customer's rating (1–5) left when approving delivery. */
+  /** Customer's rating (1–5), left when approving delivery or afterwards from the order page. */
   @Column({ type: 'int', nullable: true })
   rating: number | null;
 
   @Column({ type: 'text', nullable: true })
   review: string | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  reviewedAt: Date | null;
+
+  /** The artisan's public reply to the review (one reply, set once). */
+  @Column({ type: 'text', nullable: true })
+  reviewReply: string | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  reviewRepliedAt: Date | null;
+
+  /** Set by an admin to take a review off the artisan's profile and out of their average. */
+  @Column({ type: 'timestamptz', nullable: true })
+  reviewHiddenAt: Date | null;
 
   @OneToMany('OrderItem', (item: OrderItem) => item.order, { cascade: ['insert'] })
   items: Relation<OrderItem>[];

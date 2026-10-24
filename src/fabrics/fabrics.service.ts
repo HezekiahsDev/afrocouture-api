@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Brackets, Repository } from 'typeorm';
 import { Fabric, type PriceTier } from './entities/fabric.entity.js';
@@ -117,6 +117,12 @@ export class FabricsService {
 
   async update(user: User, id: string, dto: UpdateFabricDto): Promise<Fabric> {
     const fabric = await this.ownedFabric(user, id);
+    if (fabric.moderatedAt && dto.isPublished === true) {
+      throw new ConflictException({
+        code: 'FABRIC_MODERATED',
+        message: `AfroCouture unpublished this fabric${fabric.unpublishedReason ? `: ${fabric.unpublishedReason}` : ''}. Contact support to have it reviewed.`,
+      });
+    }
     Object.assign(fabric, definedOnly(dto));
     // Re-check even when only the base price changed: tiers must stay below it.
     fabric.priceTiers = this.validTiers(fabric.priceTiers ?? [], fabric.price);

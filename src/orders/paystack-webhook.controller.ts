@@ -4,6 +4,7 @@ import type { Request } from 'express';
 import { PaystackService } from '../payments/paystack.service.js';
 import { EscrowService } from '../escrow/escrow.service.js';
 import { OrdersService } from './orders.service.js';
+import { Public } from '../common/decorators/public.decorator.js';
 
 interface PaystackEvent {
   event?: string;
@@ -20,6 +21,8 @@ interface PaystackEvent {
  * Paystack notifications. Lives with orders because a successful charge moves an order
  * into escrow; transfer and refund events update the escrow ledger.
  */
+/** Public: Paystack calls this; every request must carry a valid x-paystack-signature. */
+@Public()
 @Controller('payments/paystack')
 export class PaystackWebhookController {
   private readonly logger = new Logger(PaystackWebhookController.name);
