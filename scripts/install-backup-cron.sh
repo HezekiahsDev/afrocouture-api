@@ -23,7 +23,7 @@ fi
 
 mkdir -p "$BACKUP_DIR"
 chmod 700 "$BACKUP_DIR"
-line="$BACKUP_CRON cd $repo && PATH=/usr/local/bin:/usr/bin:/bin bash scripts/backup-db.sh >> $BACKUP_DIR/backup.log 2>&1 $MARKER"
+line="$BACKUP_CRON cd $repo && PATH=$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin bash scripts/backup-db.sh >> $BACKUP_DIR/backup.log 2>&1 $MARKER"
 printf '%s\n%s\n' "$current" "$line" | sed '/^$/d' | crontab -
 echo "Installed: $line"
 echo "Run one now to check it works: bash scripts/backup-db.sh"

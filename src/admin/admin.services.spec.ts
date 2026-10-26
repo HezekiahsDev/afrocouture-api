@@ -19,7 +19,7 @@ describe('AdminUsersService', () => {
     const db = { getRepository: vi.fn(() => repo), query: vi.fn(async () => [{ id: target?.id, n: '2' }]) };
     const mail = { sendMail: vi.fn(async () => ({})) };
     const events = { emit: vi.fn() };
-    const config = { get: vi.fn(() => 'help@afrocouture.test') };
+    const config = { get: vi.fn(() => '+234 810 668 1869') };
     const service = new AdminUsersService(db as any, mail as any, events as any, config as any);
     return { service, repo, mail, events };
   }
@@ -32,7 +32,7 @@ describe('AdminUsersService', () => {
     }));
     expect(events.emit).toHaveBeenCalledWith(USER_SUSPENDED, { userId: 'u1' });
     await new Promise((r) => setImmediate(r));
-    expect(mail.sendMail).toHaveBeenCalledWith(expect.objectContaining({ to: 'kemi@x.test', text: expect.stringContaining('help@afrocouture.test') }));
+    expect(mail.sendMail).toHaveBeenCalledWith(expect.objectContaining({ to: 'kemi@x.test', text: expect.stringContaining('https://wa.me/2348106681869') }));
     expect(row).toMatchObject({ id: 'u1', status: 'suspended', orderCount: 2 });
   });
 

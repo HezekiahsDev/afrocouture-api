@@ -204,8 +204,10 @@ export class AdminUsersService {
     };
   }
 
+  /** Support is on WhatsApp (SUPPORT_WHATSAPP, international digits, e.g. 2348106681869). */
   private support(): string {
-    return this.config.get<string>('SUPPORT_EMAIL')?.trim() || 'AfroCouture support by replying to this email';
+    const number = (this.config.get<string>('SUPPORT_WHATSAPP') ?? '').replace(/\D/g, '');
+    return number ? `AfroCouture support on WhatsApp (+${number}, https://wa.me/${number})` : 'AfroCouture support';
   }
 
   /** Best effort: the status change stands even if the email can't be sent. */
