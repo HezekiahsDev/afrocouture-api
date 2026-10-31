@@ -15,7 +15,8 @@ export type AuditAction =
   | 'review.hide'
   | 'review.unhide'
   | 'fabric.publish'
-  | 'fabric.unpublish';
+  | 'fabric.unpublish'
+  | 'survey.export';
 
 export interface AuditEntry {
   action: AuditAction;
