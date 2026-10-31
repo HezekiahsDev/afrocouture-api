@@ -7,14 +7,18 @@ import { AppModule } from './app.module.js';
 import { GlobalExceptionFilter } from './common/filters/global-exception.filter.js';
 import { AlertsService } from './common/alerts/alerts.service.js';
 import { createAppLogger, useJsonLogs } from './common/logging/app-logger.js';
-import { REQUEST_ID_HEADER, requestContext } from './common/logging/request-context.middleware.js';
+import {
+  REQUEST_ID_HEADER,
+  requestContext,
+} from './common/logging/request-context.middleware.js';
 
 // The logger is built before ConfigModule loads .env, so pick up its log settings here.
 // Only these keys: everything else is left to ConfigModule. The real environment wins.
 try {
   const fileEnv = parseEnv(readFileSync('.env', 'utf8'));
   for (const key of ['LOG_FORMAT', 'NODE_ENV']) {
-    if (process.env[key] === undefined && fileEnv[key] !== undefined) process.env[key] = fileEnv[key];
+    if (process.env[key] === undefined && fileEnv[key] !== undefined)
+      process.env[key] = fileEnv[key];
   }
 } catch {
   // No .env file: rely on the environment.
@@ -41,6 +45,7 @@ async function bootstrap() {
     origin: [
       'http://localhost:3000',
       'http://127.0.0.1:3000',
+      'https://ipile.com.ng',
       ...frontendOrigins,
     ],
     credentials: true,
@@ -82,7 +87,11 @@ function watchProcess(alerts: AlertsService) {
     const exit = () => process.exit(1);
     setTimeout(exit, 5000).unref();
     void alerts
-      .send({ title: 'API crashed (uncaught exception) — restarting', details: err.stack ?? err.message, signature: `uncaught:${err.message}` })
+      .send({
+        title: 'API crashed (uncaught exception) — restarting',
+        details: err.stack ?? err.message,
+        signature: `uncaught:${err.message}`,
+      })
       .finally(exit);
   });
 }
