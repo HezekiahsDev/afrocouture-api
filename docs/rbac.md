@@ -80,6 +80,7 @@ Legend:
 | `GET /fabrics/mine`, `POST /fabrics` | M (own) | Creating a fabric needs an approved merchant profile. |
 | `PATCH/DELETE /fabrics/:id` | M (own) | Another merchant's fabric returns 403. |
 | `GET/PUT /measurements/me` | C (own) | Artisans see a snapshot on each order instead. |
+| `GET /surveys/me`, `/surveys/me/status`, `PUT /surveys/me/answers`, `POST /surveys/me/complete`, `/surveys/me/dismiss` | C, T, M (own) | The form comes from the caller's database role (`src/surveys/definitions`). Answers to another role's questions, or to questions hidden by earlier answers, get 400 `SURVEY_INVALID_ANSWER`. |
 | `GET /payments/resolve-account` | T, M | For payout forms. Limited to 20 per hour per user. |
 | `POST /uploads?purpose=` | depends on purpose | See the uploads table below. Limited to 60 per hour per user. |
 | `GET/PUT/DELETE /saved…` | any (own) | |
@@ -118,7 +119,8 @@ Legend:
 
 ### Admin
 
-Every `/admin/*` route has `@Roles(ADMIN)` at controller level (`src/admin/admin.controller.ts`).
+Every `/admin/*` route has `@Roles(ADMIN)` at controller level (`src/admin/admin.controller.ts`,
+`src/surveys/admin-surveys.controller.ts`).
 Non-admins get 403, anonymous callers 401 (`test/admin.e2e-spec.ts`).
 
 | Route | Notes |
@@ -134,6 +136,8 @@ Non-admins get 403, anonymous callers 401 (`test/admin.e2e-spec.ts`).
 | `GET /admin/reviews`, `PATCH /admin/reviews/:orderId` | Audited (`review.hide` / `review.unhide`). |
 | `GET /admin/fabrics`, `PATCH /admin/fabrics/:id` | Unpublishing locks the listing: the merchant gets 409 `FABRIC_MODERATED` if they try to republish. Audited (`fabric.publish` / `fabric.unpublish`). |
 | `GET /admin/audit` | The admin action log, newest first. |
+| `GET /admin/surveys`, `/admin/surveys/:surveyId`, `/admin/surveys/:surveyId/responses`, `/admin/surveys/responses/:id` | Read-only survey results (`src/surveys/admin-surveys.controller.ts`). |
+| `GET /admin/surveys/:surveyId/export.csv` | Includes names and emails. Formula-like cells are neutralised. Audited (`survey.export`). |
 
 ## Conventions for new endpoints
 
