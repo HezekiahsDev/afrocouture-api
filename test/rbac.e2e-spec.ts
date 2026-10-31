@@ -157,6 +157,8 @@ describe('RBAC', () => {
       ['get', '/ai-studio/designs'], ['get', '/notifications'], ['post', '/notifications/read'],
       ['get', '/fabrics/mine'], ['post', '/fabrics'], ['get', '/payments/resolve-account'],
       ['get', '/admin/verifications'], ['get', '/admin/orders'], ['get', '/admin/reviews'], ['get', '/admin/escrow'],
+      ['get', '/surveys/me'], ['get', '/surveys/me/status'], ['put', '/surveys/me/answers'], ['post', '/surveys/me/complete'],
+      ['post', '/surveys/me/dismiss'], ['get', '/admin/surveys'], ['get', '/admin/surveys/customer-v1/export.csv'],
     ] as const)('%s %s → 401', async (method, url) => {
       await as(null)[method](url).expect(401);
     });
@@ -216,6 +218,11 @@ describe('RBAC', () => {
       ['customer', 'post', '/uploads?purpose=fabric'],
       ['merchant', 'post', '/uploads?purpose=chat'],
       ['admin', 'post', '/uploads?purpose=chat'],
+      ['admin', 'get', '/surveys/me'],
+      ['admin', 'put', '/surveys/me/answers', { answers: {} }],
+      ['customer', 'get', '/admin/surveys'],
+      ['tailor', 'get', '/admin/surveys/tailor-v1/responses'],
+      ['merchant', 'get', '/admin/surveys/merchant-v1/export.csv'],
     ];
     it.each(forbidden)('%s %s %s', async (who, method, url, body) => {
       await as(who)[method](url, body ?? {}).expect(403);
@@ -226,6 +233,50 @@ describe('RBAC', () => {
       ['customer', 'deliver'], ['tailor', 'pay'], ['admin', 'approve'],
     ])('%s cannot %s an order', async (who, action) => {
       await as(who).post(`/orders/${ids.order}/${action}`, {}).expect(403);
+    });
+  });
+
+  describe('surveys are scoped to the caller’s role', () => {
+    it('each member gets the form for their database role', async () => {
+      for (const [who, survey] of [['customer', 'customer-v1'], ['tailor', 'tailor-v1'], ['merchant', 'merchant-v1']]) {
+        const res = await as(who).get('/surveys/me').expect(200);
+        expect(res.body.survey.id).toBe(survey);
+      }
+    });
+
+    it('answers must belong to that form and to the questions currently shown', async () => {
+      const other = await as('customer').put('/surveys/me/answers', { answers: { listing_info: { value: ['material'] } } }).expect(400);
+      expect(other.body.error).toMatchObject({ code: 'SURVEY_INVALID_ANSWER', question: 'listing_info' });
+      // custom_order_flow is only asked when usage involves a tailor.
+      await as('customer').put('/surveys/me/answers', { answers: { usage: { value: 'fabrics' }, custom_order_flow: { value: 'yes' } } }).expect(400);
+      await as('customer').put('/surveys/me/answers', { answers: { usage: { value: 'find_tailor' }, custom_order_flow: { value: 'yes' } } }).expect(200);
+      const incomplete = await as('customer').post('/surveys/me/complete').expect(400);
+      expect(incomplete.body.error).toMatchObject({ code: 'SURVEY_INCOMPLETE' });
+      expect(incomplete.body.error.missing).toContain('navigation');
+    });
+
+    it('a submitted response is visible to admins and exported to CSV, never to other members', async () => {
+      await as('customer').put('/surveys/me/answers', {
+        answers: {
+          navigation: { value: 'easy' }, discovery: { value: 'easy' }, trust_info: { value: ['reviews'] },
+          hesitations: { value: ['nothing'] }, escrow_comfort: { value: 'very' }, ordering_clarity: { value: 'very_clear' },
+          had_problem: { value: 'no' }, improvements: { value: ['=cmd|calc', '', ''] },
+        },
+      }).expect(200);
+      await as('customer').post('/surveys/me/complete').expect(200);
+      expect((await as('customer').get('/surveys/me/status').expect(200)).body).toMatchObject({ completed: true });
+      // The other customer has their own, empty response.
+      expect((await as('otherCustomer').get('/surveys/me').expect(200)).body.response).toBeNull();
+
+      const list = await as('admin').get('/admin/surveys/customer-v1/responses?status=completed').expect(200);
+      expect(list.body.items).toHaveLength(1);
+      expect(list.body.items[0].user).toMatchObject({ email: 'customer@rbac.test' });
+      await as('admin').get(`/admin/surveys/responses/${list.body.items[0].id}`).expect(200);
+
+      const csv = await as('admin').get('/admin/surveys/customer-v1/export.csv').expect(200);
+      expect(csv.headers['content-type']).toContain('text/csv');
+      expect(csv.text).toContain('customer@rbac.test');
+      expect(csv.text).toContain(`"'=cmd|calc"`);
     });
   });
 

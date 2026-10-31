@@ -23,6 +23,7 @@ import { StylesModule } from './styles/styles.module.js';
 import { SavedItemsModule } from './saved-items/saved-items.module.js';
 import { MeasurementsModule } from './measurements/measurements.module.js';
 import { AdminModule } from './admin/admin.module.js';
+import { SurveysModule } from './surveys/surveys.module.js';
 import { OrdersModule } from './orders/orders.module.js';
 import { EscrowModule } from './escrow/escrow.module.js';
 import { ChatModule } from './chat/chat.module.js';
@@ -51,6 +52,7 @@ import { AiStudioModule } from './ai-studio/ai-studio.module.js';
     SavedItemsModule,
     MeasurementsModule,
     AdminModule,
+    SurveysModule,
     PaymentsModule,
     OrdersModule,
     EscrowModule,

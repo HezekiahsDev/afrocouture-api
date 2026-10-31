@@ -44,7 +44,8 @@ async function bootstrap() {
       ...frontendOrigins,
     ],
     credentials: true,
-    exposedHeaders: [REQUEST_ID_HEADER],
+    // Content-Disposition lets the admin dashboard name CSV downloads.
+    exposedHeaders: [REQUEST_ID_HEADER, 'Content-Disposition'],
   });
 
   app.useGlobalPipes(
