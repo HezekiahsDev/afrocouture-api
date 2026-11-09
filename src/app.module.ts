@@ -28,6 +28,7 @@ import { OrdersModule } from './orders/orders.module.js';
 import { EscrowModule } from './escrow/escrow.module.js';
 import { ChatModule } from './chat/chat.module.js';
 import { AiStudioModule } from './ai-studio/ai-studio.module.js';
+import { LogisticsModule } from './logistics/logistics.module.js';
 
 @Module({
   imports: [
@@ -58,6 +59,7 @@ import { AiStudioModule } from './ai-studio/ai-studio.module.js';
     EscrowModule,
     ChatModule,
     AiStudioModule,
+    LogisticsModule,
   ],
   controllers: [AppController],
   providers: [

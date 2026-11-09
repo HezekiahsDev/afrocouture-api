@@ -873,6 +873,58 @@ export class OrdersService implements OnModuleInit {
     return completed;
   }
 
+  // ───────────────────────── Rider delivery (Dali) ─────────────────────────
+
+  /**
+   * Moves an order to delivered when Dali reports the rider handed it over. Safe to call
+   * more than once (webhooks can repeat or arrive out of order); only the first call that
+   * moves the order out of paid/in_progress notifies the customer.
+   */
+  async markDeliveredByCourier(
+    orderId: string,
+    info: { deliveryId: string; runnerName?: string | null; externalReference?: string | null },
+  ): Promise<{ order: Order; changed: boolean }> {
+    let changed = false;
+    const { order, events } = await this.transaction(async (em, events) => {
+      const order = await this.lockOrder(em, orderId);
+      if (order.status !== OrderStatus.PAID && order.status !== OrderStatus.IN_PROGRESS) return order;
+      order.status = OrderStatus.DELIVERED;
+      order.deliveredAt = new Date();
+      await em.save(order);
+      const rider = info.runnerName?.trim();
+      await this.record(
+        em,
+        events,
+        order,
+        'delivered',
+        rider ? `Delivered by Dali rider ${rider}` : 'Delivered by Dali rider',
+        null,
+        { deliveryId: info.deliveryId, externalReference: info.externalReference ?? null },
+      );
+      changed = true;
+      return order;
+    });
+    this.flush(events);
+
+    if (changed) {
+      void this.notifyUser(order.customerId, `Your ${order.garmentType} has been delivered`, [
+        'The Dali rider handed over your piece. Check it over, then approve the order to release payment to your artisan.',
+        'If something is wrong, open a dispute from the order page instead.',
+      ], order.id, 'order_delivered');
+    }
+    return { order, changed };
+  }
+
+  /** Adds a courier update to the order timeline without changing its status. */
+  async recordCourierEvent(orderId: string, type: string, label: string, data?: Record<string, unknown>): Promise<void> {
+    const { events } = await this.transaction(async (em, events) => {
+      const order = await this.lockOrder(em, orderId);
+      await this.record(em, events, order, type, label, null, data);
+      return order;
+    });
+    this.flush(events);
+  }
+
   // ───────────────────────── Internals ─────────────────────────
 
   /** Runs `fn` in a transaction; order events it records are emitted only after commit. */

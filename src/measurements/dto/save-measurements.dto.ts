@@ -26,6 +26,10 @@ export class DeliveryAddressDto {
   @IsOptional()
   @Matches(/^\+?[0-9 ]{7,16}$/, { message: 'Enter a valid phone number.' })
   phone?: string;
+
+  /** Pinned location for rider delivery (Dali needs coordinates, not just an address). */
+  @IsOptional() @IsNumber({ maxDecimalPlaces: 6 }) @Min(-90) @Max(90) lat?: number;
+  @IsOptional() @IsNumber({ maxDecimalPlaces: 6 }) @Min(-180) @Max(180) lng?: number;
 }
 
 export class SaveMeasurementsDto {
