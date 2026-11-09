@@ -7,6 +7,9 @@ export interface DeliveryAddress {
   state: string;
   landmark?: string;
   phone?: string;
+  /** Pinned coordinates for rider delivery, when the customer shared their location. */
+  lat?: number;
+  lng?: number;
 }
 
 /** Postgres returns numeric columns as strings; expose them as numbers. */

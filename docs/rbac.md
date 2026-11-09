@@ -117,6 +117,16 @@ Legend:
 | `POST /orders/:id/items/:itemId/ship` | M, must own the line (else 404) |
 | `GET/POST /orders/:id/messages`, socket `join_order` / `send_message` | The order's customer or tailor only. Merchants, admins and others get 403. |
 
+### Rider delivery (Dali)
+
+| Route | Who |
+| --- | --- |
+| `GET /orders/:id/delivery` | The order's customer, tailor or an admin. The handover PIN is returned to the customer and admins only, never the tailor. |
+| `POST /orders/:id/delivery/quote`, `POST /orders/:id/delivery`, `POST /orders/:id/delivery/cancel` | T (must be the order's tailor, else 404) or A. Only while the order is `PAID`/`IN_PROGRESS` at the `delivery` milestone. |
+| `POST /logistics/dali/webhook` | **Public**, but every request needs a valid `X-Dali-Signature` over the raw body. Event ids are deduplicated. |
+| `GET /admin/logistics/account`, `GET /admin/logistics` | A. Account balance, daily cap and all rider jobs. |
+| `POST /admin/logistics/webhooks/test`, `POST /admin/logistics/:deliveryId/simulate` | A. Simulation only works on test-key (`livemode: false`) deliveries. |
+
 ### Admin
 
 Every `/admin/*` route has `@Roles(ADMIN)` at controller level (`src/admin/admin.controller.ts`,

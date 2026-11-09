@@ -157,6 +157,7 @@ describe('RBAC', () => {
       ['get', '/ai-studio/designs'], ['get', '/notifications'], ['post', '/notifications/read'],
       ['get', '/fabrics/mine'], ['post', '/fabrics'], ['get', '/payments/resolve-account'],
       ['get', '/admin/verifications'], ['get', '/admin/orders'], ['get', '/admin/reviews'], ['get', '/admin/escrow'],
+      ['get', '/admin/logistics'], ['get', '/admin/logistics/account'],
       ['get', '/surveys/me'], ['get', '/surveys/me/status'], ['put', '/surveys/me/answers'], ['post', '/surveys/me/complete'],
       ['post', '/surveys/me/dismiss'], ['get', '/admin/surveys'], ['get', '/admin/surveys/customer-v1/export.csv'],
     ] as const)('%s %s → 401', async (method, url) => {
@@ -166,6 +167,7 @@ describe('RBAC', () => {
     it('order-scoped routes → 401', async () => {
       await as(null).get(`/orders/${ids.order}`).expect(401);
       await as(null).get(`/orders/${ids.order}/messages`).expect(401);
+      await as(null).get(`/orders/${ids.order}/delivery`).expect(401);
       await as(null).post(`/orders/${ids.order}/approve`, { rating: 5 }).expect(401);
     });
 
@@ -198,6 +200,8 @@ describe('RBAC', () => {
       ['tailor', 'get', '/admin/orders'],
       ['merchant', 'get', '/admin/reviews'],
       ['customer', 'get', '/admin/escrow'],
+      ['customer', 'get', '/admin/logistics'],
+      ['tailor', 'get', '/admin/logistics/account'],
       ['customer', 'get', '/tailors/me/profile'],
       ['merchant', 'get', '/tailors/me/profile'],
       ['customer', 'get', '/merchants/me/profile'],
@@ -233,6 +237,14 @@ describe('RBAC', () => {
       ['customer', 'deliver'], ['tailor', 'pay'], ['admin', 'approve'],
     ])('%s cannot %s an order', async (who, action) => {
       await as(who).post(`/orders/${ids.order}/${action}`, {}).expect(403);
+    });
+
+    it('only the order tailor or an admin can book a rider', async () => {
+      await as('customer').post(`/orders/${ids.order}/delivery`).expect(403);
+      await as('customer')
+        .post(`/orders/${ids.order}/delivery/quote`, { pickup: { lat: 6.5, lng: 3.3 }, dropoff: { lat: 6.6, lng: 3.4 } })
+        .expect(403);
+      await as('customer').post(`/orders/${ids.order}/delivery/cancel`, {}).expect(403);
     });
   });
 

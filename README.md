@@ -87,6 +87,7 @@ See `.env.example`. Beyond the database and JWT secrets:
 | `VERTEX_AI_PROJECT_ID`, `VERTEX_AI_LOCATION`, `VERTEX_IMAGEN_MODEL`, `GOOGLE_APPLICATION_CREDENTIALS_JSON` | AI Design Studio (Vertex AI Imagen). AI Studio returns 503 until configured. |
 | `AI_DAILY_LIMIT` | AI generations per person per UTC day (default 20) |
 | `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, `REDIS_DB` | Rate limiting (fails open if Redis is unreachable) |
+| `DALI_LOGISTICS_API_KEY`, `DALI_LOGISTICS_WEBHOOK_SECRET`, `DALI_LOGISTICS_BASE_URL` | Dali rider delivery: quotes, booking and webhook tracking. Rider endpoints return 503 until the key is set; webhooks are rejected without the secret. |
 
 `JWT_SECRET` and `JWT_REFRESH_SECRET` are required — the API refuses to start without them.
 
@@ -103,6 +104,29 @@ The full contract is in [`docs/orders-payments-ai-contract.md`](docs/orders-paym
   nginx must pass WebSocket upgrades (the provided `scripts/setup-nginx.sh` does).
 - **AI Studio:** `/ai-studio/*`; images are generated with Imagen and stored on Cloudinary.
 - **Rate limits:** sign-in, sign-up, code and reset endpoints, uploads and AI generation are limited per IP / email / user.
+
+### Rider delivery (Dali Logistics)
+
+The tailor books a Dali rider once the order is paid and reaches the `delivery` milestone. Fees are paid
+from the prepaid Dali balance, not the order total; Dali re-quotes on creation.
+
+- `GET /orders/:id/delivery` — the latest rider job. The customer sees the runner, status timeline and
+  their handover PIN; the tailor sees the same job without the PIN.
+- `POST /orders/:id/delivery/quote` and `POST /orders/:id/delivery` — price and book (tailor or admin only).
+- `POST /orders/:id/delivery/cancel` — before pickup (tailor or admin only).
+- `POST /logistics/dali/webhook` — public, verified with `X-Dali-Signature` (HMAC-SHA256 over
+  `<timestamp>.<raw body>`); events are deduplicated by event id. `delivery.delivered` / `delivery.completed`
+  move the order to `DELIVERED`, which starts the normal customer approval / auto-complete flow.
+- Admin: `GET /admin/logistics/account` (balance, daily cap), `GET /admin/logistics`, and (test keys only)
+  `POST /admin/logistics/webhooks/test` and `POST /admin/logistics/:deliveryId/simulate`.
+
+**Dali console setup:** set the partner webhook URL to `https://<api-domain>/logistics/dali/webhook` and use
+the same `whsec_…` value as `DALI_LOGISTICS_WEBHOOK_SECRET`. The API needs the
+`logistics.deliveries:write`, `logistics.quotes:read` and `logistics.webhooks:manage` scopes; tracking uses
+webhooks because the partner key has no `logistics.deliveries:read` scope. Dali requires coordinates for both
+stops — customers can pin their address in the fit profile, and the tailor can drop a pin for the atelier.
+
+**Full contract:** [`DALI-LOGISTICS-INTEGRATION.md`](DALI-LOGISTICS-INTEGRATION.md).
 
 ## Testing & Build
 
