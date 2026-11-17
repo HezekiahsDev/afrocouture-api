@@ -21,7 +21,7 @@ export interface PublicFabric {
   priceTiers: PriceTier[];
   imageUrl: string;
   isSample: boolean;
-  merchant: { id: string; businessName: string | null; city: string | null; verified: boolean };
+  merchant: { id: string; businessName: string | null; city: string | null; state: string | null; verified: boolean };
 }
 
 function toPublicFabric(f: Fabric): PublicFabric {
@@ -41,6 +41,7 @@ function toPublicFabric(f: Fabric): PublicFabric {
       id: f.merchant.id,
       businessName: f.merchant.businessName,
       city: f.merchant.city,
+      state: f.merchant.state,
       verified: f.merchant.verificationStatus === KycStatus.APPROVED && !f.merchant.isSample,
     },
   };

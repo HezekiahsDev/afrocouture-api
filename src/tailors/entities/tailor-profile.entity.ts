@@ -21,6 +21,10 @@ export class TailorProfile {
   @Column({ type: 'varchar', nullable: true })
   city: string | null;
 
+  /** State the workshop is in; used when fabric is delivered to the artisan. */
+  @Column({ type: 'varchar', nullable: true })
+  state: string | null;
+
   /** One-line description of the craft, e.g. "Heritage embroidery & agbada". */
   @Column({ type: 'varchar', nullable: true })
   craft: string | null;

@@ -40,6 +40,13 @@ export class OrdersController {
     return this.orders.checkoutFabric(user, dto);
   }
 
+  /** Server-authoritative price preview for the checkout summary. */
+  @Post('fabric-quote')
+  @Roles(UserRole.CUSTOMER, UserRole.TAILOR)
+  quoteFabric(@CurrentUser() user: User, @Body() dto: FabricCheckoutDto) {
+    return this.orders.quoteFabric(user, dto);
+  }
+
   /** Declared before ':id', which would otherwise capture this path. */
   @Get('checkout-config')
   checkoutConfig() {

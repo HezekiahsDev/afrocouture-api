@@ -47,10 +47,11 @@ other party (best effort, via `MailService`).
 
 ## Fabric checkout (pay now, no commission)
 
-`POST /orders/fabric-checkout` `{ fabrics: [{ fabricId, quantity }] (1–20), destination: 'customer' | 'tailor', deliveryAddress? (with phone, required for 'customer'), tailorId? (required for 'tailor') }`
-creates an order with `type: 'fabric'`, no quote and no fit profile. `GET /orders/checkout-config` → `{ platformFeePercent }` lets the page show the exact total.
+`POST /orders/fabric-checkout` `{ fabrics: [{ fabricId, quantity }] (1–20), destination: 'customer' | 'tailor', deliveryAddress? (with phone and state, required for 'customer'), tailorId? (required for 'tailor') }`
+creates an order with `type: 'fabric'`, no quote and no fit profile. `GET /orders/checkout-config` → `{ platformFeePercent, deliveryFees }` exposes the rules, and `POST /orders/fabric-quote` takes the same body as checkout and returns the authoritative `{ fabricTotal, platformFee, deliveryFee, totalAmount, shipments }` preview. The server recalculates the total on checkout; client-side values are never trusted.
 
-- `totalAmount = fabricTotal + platformFee`. The order starts in `quoted` ("awaiting payment") and uses the normal `/pay` and `/verify-payment`. Paying removes those fabrics from the buyer's saved selection.
+- `totalAmount = fabricTotal + platformFee + deliveryFee`. The order starts in `quoted` ("awaiting payment") and uses the normal `/pay` and `/verify-payment`. Paying removes those fabrics from the buyer's saved selection.
+- Delivery is charged per merchant shipment (fabrics from one merchant ship together). Intra-state is **₦2,000**. Interstate is **₦5,000** base, plus **₦2,000** when the state-centre distance is over 500 km, plus **₦2,000** when that shipment's subtotal is over ₦100,000 and **₦5,000** when it is over ₦300,000 (both Value tiers apply). Origin state comes from merchant KYC with a city fallback; destination state comes from the delivery address or the artisan's KYC with a city fallback. IPILE keeps the full delivery fee to fund logistics through its partner; merchants and tailors never receive it.
 - **Buyers** are customers (delivering to themselves or to an artisan) and verified artisans (delivering to their own workshop). Both pay as the order's `customerId`; `/pay`, `/verify-payment`, `/cancel` and `/dispute` accept either role.
 - Merchants ship as usual; `shipTo` is the buyer's address and phone for `'customer'`, and the workshop's address, `contactPhone` and `whatsappNumber` for `'tailor'`. An artisan can only be a fabric destination when their workshop has an address and both contact numbers on file (`canReceiveFabric` on the public tailor payload), so every courier has someone to reach.
 - `POST /orders/:id/items/:itemId/receive` is done by the recipient: the buyer (customer or artisan) or the tailor. It pays that merchant once all their lines arrived, and completes the order once every line has.
