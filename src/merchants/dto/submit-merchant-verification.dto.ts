@@ -18,6 +18,7 @@ const url = { protocols: ['https'], require_protocol: true };
 export class SaveMerchantProfileDto {
   @IsOptional() @IsString() @Length(2, 120) businessName?: string;
   @IsOptional() @IsString() @Length(2, 60) city?: string;
+  @IsOptional() @IsString() @Length(2, 60) state?: string;
   @IsOptional() @IsString() @MaxLength(160) marketHub?: string;
   @IsOptional() @IsEnum(SourcingType) sourcingType?: SourcingType;
 

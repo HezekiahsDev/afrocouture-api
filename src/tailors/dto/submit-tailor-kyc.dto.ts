@@ -19,6 +19,7 @@ export class SaveTailorProfileDto {
   @IsOptional() @IsString() @Length(2, 80) displayName?: string;
   @IsOptional() @IsString() @Length(2, 120) atelierName?: string;
   @IsOptional() @IsString() @Length(2, 60) city?: string;
+  @IsOptional() @IsString() @Length(2, 60) state?: string;
   @IsOptional() @IsString() @MaxLength(120) craft?: string;
   @IsOptional() @IsString() @MaxLength(1200) bio?: string;
   @IsOptional() @IsInt() @Min(0) @Max(70) yearsExperience?: number;

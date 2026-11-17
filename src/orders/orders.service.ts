@@ -42,6 +42,7 @@ import { MerchantProfile } from '../merchants/entities/merchant-profile.entity.j
 import { Fabric } from '../fabrics/entities/fabric.entity.js';
 import { unitPriceFor } from '../fabrics/pricing.js';
 import { CustomerFitProfile } from '../measurements/entities/customer-fit-profile.entity.js';
+import { FABRIC_DELIVERY_RULES, quoteFabricDelivery, resolveNigerianState } from './fabric-delivery-fee.js';
 import { SavedItem, SavedItemType } from '../saved-items/entities/saved-item.entity.js';
 import { AiDesign } from '../ai-studio/entities/ai-design.entity.js';
 import { Style } from '../styles/entities/style.entity.js';
@@ -58,6 +59,11 @@ export interface OrderEventPayload {
 }
 
 type Viewer = 'customer' | 'tailor' | 'merchant' | 'admin';
+
+type BuiltFabricItem = Pick<
+  OrderItem,
+  'fabricId' | 'merchantId' | 'fabricName' | 'imageUrl' | 'unit' | 'quantity' | 'unitPrice' | 'lineTotal'
+> & { merchantState: string | null; merchantCity: string | null };
 
 const MILESTONE_ORDER = [OrderMilestone.PLACED, OrderMilestone.CUTTING, OrderMilestone.FITTING, OrderMilestone.DELIVERY];
 const MILESTONE_LABEL: Record<OrderMilestone, string> = {
@@ -164,7 +170,7 @@ export class OrdersService implements OnModuleInit {
         deliveryAddress: fit.deliveryAddress!,
         desiredDate: dto.desiredDate ?? null,
         fabricTotal,
-        items: items.map((i) => em.create(OrderItem, i)),
+        items: this.toOrderItems(em, items),
       });
       const saved = await em.save(order);
       await this.record(em, events, saved, 'requested', `${customer.fullName ?? 'The customer'} requested a ${saved.garmentType}`, customer.id);
@@ -181,6 +187,59 @@ export class OrdersService implements OnModuleInit {
 
   /** Pay for fabric now. The order waits for payment, then the merchants ship it. */
   async checkoutFabric(customer: User, dto: FabricCheckoutDto) {
+    const quote = await this.fabricPricing(customer, dto);
+    const toTailor = dto.destination === FabricDestination.TAILOR;
+
+    const { order, events } = await this.transaction(async (em, events) => {
+      const order = em.create(Order, {
+        type: OrderType.FABRIC,
+        fabricDestination: dto.destination,
+        reference: await this.uniqueReference(em),
+        customerId: customer.id,
+        tailorId: quote.tailorId,
+        tailorUserId: quote.tailorUserId,
+        status: OrderStatus.QUOTED,
+        milestone: OrderMilestone.PLACED,
+        garmentType: FABRIC_ORDER_TITLE,
+        brief: '',
+        referenceImageUrls: [],
+        fitSnapshot: null,
+        deliveryAddress: toTailor ? null : dto.deliveryAddress!,
+        fabricTotal: quote.fabricTotal,
+        platformFee: quote.platformFee,
+        // The delivery fee is IPILE logistics revenue, not a vendor or artisan payout.
+        deliveryFee: quote.deliveryFee,
+        totalAmount: quote.totalAmount,
+        items: this.toOrderItems(em, quote.items),
+      });
+      const saved = await em.save(order);
+      await this.record(em, events, saved, 'fabric_checkout', 'Fabric order placed — waiting for payment', customer.id);
+      return saved;
+    });
+    this.flush(events);
+    return this.get(customer, order.id);
+  }
+
+  /** Preview the exact fabric, platform and delivery charges before checkout. */
+  async quoteFabric(customer: User, dto: FabricCheckoutDto) {
+    const quote = await this.fabricPricing(customer, dto);
+    return {
+      fabricTotal: quote.fabricTotal,
+      platformFee: quote.platformFee,
+      deliveryFee: quote.deliveryFee,
+      totalAmount: quote.totalAmount,
+      currency: quote.currency,
+      shipments: quote.shipments,
+    };
+  }
+
+  /** What the checkout page needs to show the same total Paystack will charge. */
+  checkoutConfig() {
+    return { platformFeePercent: this.feePercent, deliveryFees: FABRIC_DELIVERY_RULES };
+  }
+
+  /** Single source of truth for both the quote preview and the saved order total. */
+  private async fabricPricing(customer: User, dto: FabricCheckoutDto) {
     const toTailor = dto.destination === FabricDestination.TAILOR;
     const tailor = toTailor ? await this.orderableTailor(customer, dto.tailorId!, 'fabric') : null;
     if (!toTailor && !dto.deliveryAddress?.phone) {
@@ -191,37 +250,37 @@ export class OrdersService implements OnModuleInit {
     const fabricTotal = items.reduce((sum, item) => sum + item.lineTotal, 0);
     const platformFee = this.platformFee(fabricTotal);
 
-    const { order, events } = await this.transaction(async (em, events) => {
-      const order = em.create(Order, {
-        type: OrderType.FABRIC,
-        fabricDestination: dto.destination,
-        reference: await this.uniqueReference(em),
-        customerId: customer.id,
-        tailorId: tailor?.id ?? null,
-        tailorUserId: tailor?.userId ?? null,
-        status: OrderStatus.QUOTED,
-        milestone: OrderMilestone.PLACED,
-        garmentType: FABRIC_ORDER_TITLE,
-        brief: '',
-        referenceImageUrls: [],
-        fitSnapshot: null,
-        deliveryAddress: toTailor ? null : dto.deliveryAddress!,
-        fabricTotal,
-        platformFee,
-        totalAmount: fabricTotal + platformFee,
-        items: items.map((i) => em.create(OrderItem, i)),
-      });
-      const saved = await em.save(order);
-      await this.record(em, events, saved, 'fabric_checkout', 'Fabric order placed — waiting for payment', customer.id);
-      return saved;
+    const destinationState = toTailor
+      ? resolveNigerianState(tailor!.state, tailor!.city)
+      : resolveNigerianState(dto.deliveryAddress?.state, dto.deliveryAddress?.city);
+    const destinationCity = toTailor ? tailor!.city : dto.deliveryAddress?.city;
+    const byMerchant = new Map<string, { subtotal: number; originState: string | null; originCity: string | null }>();
+    for (const item of items) {
+      const current = byMerchant.get(item.merchantId) ?? {
+        subtotal: 0,
+        originState: item.merchantState,
+        originCity: item.merchantCity,
+      };
+      current.subtotal += item.lineTotal;
+      byMerchant.set(item.merchantId, current);
+    }
+    const delivery = quoteFabricDelivery({
+      destinationState,
+      destinationCity,
+      shipments: [...byMerchant.entries()].map(([merchantId, shipment]) => ({ merchantId, ...shipment })),
     });
-    this.flush(events);
-    return this.get(customer, order.id);
-  }
 
-  /** What the checkout page needs to show the same total Paystack will charge. */
-  checkoutConfig() {
-    return { platformFeePercent: this.feePercent };
+    return {
+      items,
+      tailorId: tailor?.id ?? null,
+      tailorUserId: tailor?.userId ?? null,
+      fabricTotal,
+      platformFee,
+      deliveryFee: delivery.deliveryFee,
+      currency: delivery.currency,
+      shipments: delivery.shipments,
+      totalAmount: fabricTotal + platformFee + delivery.deliveryFee,
+    };
   }
 
   async list(user: User, query: ListOrdersQuery) {
@@ -1094,7 +1153,8 @@ export class OrdersService implements OnModuleInit {
       const payout = await this.escrow.reserveRelease(em, order, { type: 'merchant', id: merchantId }, amount);
       if (payout) payouts.push(payout);
     }
-    if (!order.tailorId) return;
+    // A fabric order's tailor only confirms receipt. The delivery fee stays with IPILE.
+    if (!order.tailorId || order.type === OrderType.FABRIC) return;
     const tailorAmount = (order.workmanshipPrice ?? 0) + (order.deliveryFee ?? 0);
     const payout = await this.escrow.reserveRelease(em, order, { type: 'tailor', id: order.tailorId }, tailorAmount);
     if (payout) payouts.push(payout);
@@ -1131,11 +1191,24 @@ export class OrdersService implements OnModuleInit {
     });
   }
 
+  private toOrderItems(em: EntityManager, items: BuiltFabricItem[]) {
+    return items.map((item) => em.create(OrderItem, {
+      fabricId: item.fabricId,
+      merchantId: item.merchantId,
+      fabricName: item.fabricName,
+      imageUrl: item.imageUrl,
+      unit: item.unit,
+      quantity: item.quantity,
+      unitPrice: item.unitPrice,
+      lineTotal: item.lineTotal,
+    }));
+  }
+
   private async buildItems(
     customer: User,
     dto: Pick<CreateOrderDto, 'fabrics' | 'useSavedFabrics'>,
     maxFabrics = 5,
-  ): Promise<Pick<OrderItem, 'fabricId' | 'merchantId' | 'fabricName' | 'imageUrl' | 'unit' | 'quantity' | 'unitPrice' | 'lineTotal'>[]> {
+  ): Promise<BuiltFabricItem[]> {
     const wanted = new Map<string, number>();
     if (dto.useSavedFabrics) {
       const saved = await this.dataSource
@@ -1169,6 +1242,8 @@ export class OrdersService implements OnModuleInit {
         quantity,
         unitPrice,
         lineTotal: unitPrice * quantity,
+        merchantState: fabric.merchant.state,
+        merchantCity: fabric.merchant.city,
       };
     });
   }

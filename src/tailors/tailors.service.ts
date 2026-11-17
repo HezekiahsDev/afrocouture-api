@@ -16,6 +16,7 @@ import { PAYOUT_FIELDS, notifyPayoutAccountChanged, resetRecipientIfChanged } fr
 const LIVE_EDITABLE: (keyof SaveTailorProfileDto)[] = [
   'craft',
   'bio',
+  'state',
   'specialtyTags',
   'startingPrice',
   'portraitUrl',
@@ -31,6 +32,7 @@ const REQUIRED_FOR_SUBMIT: [keyof TailorProfile, string][] = [
   ['displayName', 'your display name'],
   ['atelierName', 'your atelier name'],
   ['city', 'your city'],
+  ['state', 'your state'],
   ['craft', 'a one-line description of your craft'],
   ['startingPrice', 'a starting price'],
   ['portraitUrl', 'a portrait photo'],
@@ -52,6 +54,7 @@ export type PublicTailor = Pick<
   | 'displayName'
   | 'atelierName'
   | 'city'
+  | 'state'
   | 'craft'
   | 'bio'
   | 'yearsExperience'
@@ -79,6 +82,7 @@ export function toPublicTailor(p: TailorProfile): PublicTailor {
     displayName: p.displayName,
     atelierName: p.atelierName,
     city: p.city,
+    state: p.state,
     craft: p.craft,
     bio: p.bio,
     yearsExperience: p.yearsExperience,

@@ -6,6 +6,7 @@ import { createTestApp, resetDatabase, tokenFor } from './helpers/test-app.js';
 import { PaystackService } from '../src/payments/paystack.service.js';
 import { OrdersService } from '../src/orders/orders.service.js';
 import { OrderItem } from '../src/orders/entities/order-item.entity.js';
+import { EscrowService } from '../src/escrow/escrow.service.js';
 import { EscrowTransaction } from '../src/escrow/entities/escrow-transaction.entity.js';
 import { User } from '../src/users/entities/user.entity.js';
 import { TailorProfile } from '../src/tailors/entities/tailor-profile.entity.js';
@@ -42,8 +43,13 @@ class FakePaystack {
 }
 
 const ADDRESS = { line1: '7 Bourdillon Road, Ikoyi', city: 'Lagos', state: 'Lagos', phone: '+234 801 234 5678' };
+const KANO_ADDRESS = { ...ADDRESS, city: 'Kano', state: 'Kano' };
 const TAILOR_PHONE = '+234 802 111 2233';
 const TAILOR_WHATSAPP = '+234 803 444 5566';
+/** Kano → Lagos is over the 500 km far-band threshold. */
+const FAR_INTERSTATE_FEE = 7_000;
+const INTRA_STATE_FEE = 2_000;
+const VALUE_TIER_SURCHARGE = 7_000;
 
 describe('Fabric checkout', () => {
   let app: INestApplication;
@@ -62,6 +68,8 @@ describe('Fabric checkout', () => {
   const toTailor = (tailorProfile = ids.tailorProfile) => ({ fabrics: fabrics(), destination: 'tailor', tailorId: tailorProfile });
   const releases = (orderId: string) =>
     ds.getRepository(EscrowTransaction).find({ where: { orderId, type: 'release_merchant' as never } });
+  const tailorReleases = (orderId: string) =>
+    ds.getRepository(EscrowTransaction).find({ where: { orderId, type: 'release_tailor' as never } });
 
   async function pay(orderId: string, who = 'customer') {
     const { body: started } = await as(who).post(`/orders/${orderId}/pay`).expect(200);
@@ -96,7 +104,7 @@ describe('Fabric checkout', () => {
     ids.tailorProfile = (
       await ds.getRepository(TailorProfile).save(
         ds.getRepository(TailorProfile).create({
-          userId: tailor.id, displayName: 'Ngozi', atelierName: 'Ngozi Atelier', city: 'Lagos', workshopAddress: '3 Awolowo Way', kycStatus: KycStatus.APPROVED, ...bank,
+          userId: tailor.id, displayName: 'Ngozi', atelierName: 'Ngozi Atelier', city: 'Lagos', state: 'Lagos', workshopAddress: '3 Awolowo Way', kycStatus: KycStatus.APPROVED, ...bank,
           contactPhone: TAILOR_PHONE, whatsappNumber: TAILOR_WHATSAPP,
         }),
       )
@@ -105,13 +113,13 @@ describe('Fabric checkout', () => {
     ids.bareTailorProfile = (
       await ds.getRepository(TailorProfile).save(
         ds.getRepository(TailorProfile).create({
-          userId: bareTailor.id, displayName: 'Emeka', atelierName: 'Emeka Atelier', city: 'Enugu', workshopAddress: '9 Ogui Road', kycStatus: KycStatus.APPROVED, ...bank,
+          userId: bareTailor.id, displayName: 'Emeka', atelierName: 'Emeka Atelier', city: 'Enugu', state: 'Enugu', workshopAddress: '9 Ogui Road', kycStatus: KycStatus.APPROVED, ...bank,
         }),
       )
     ).id;
     ids.merchantProfile = (
       await ds.getRepository(MerchantProfile).save(
-        ds.getRepository(MerchantProfile).create({ userId: merchant.id, businessName: 'Bola Textiles', city: 'Kano', verificationStatus: KycStatus.APPROVED, ...bank }),
+        ds.getRepository(MerchantProfile).create({ userId: merchant.id, businessName: 'Bola Textiles', city: 'Kano', state: 'Kano', verificationStatus: KycStatus.APPROVED, ...bank }),
       )
     ).id;
     ids.fabric = (
@@ -128,10 +136,47 @@ describe('Fabric checkout', () => {
     await app?.close();
   });
 
-  it('needs no fit profile, and charges the fabric plus the platform fee', async () => {
+  it('needs no fit profile, and charges fabric + platform fee + retained delivery fee', async () => {
     const { body } = await as('customer').post('/orders/fabric-checkout', toMe()).expect(201);
     const fee = Math.round((20000 * feePercent) / 100);
-    expect(body).toMatchObject({ type: 'fabric', fabricDestination: 'customer', status: 'quoted', tailorId: null, fitSnapshot: null, fabricTotal: 20000, platformFee: fee, totalAmount: 20000 + fee });
+    expect(body).toMatchObject({
+      type: 'fabric',
+      fabricDestination: 'customer',
+      status: 'quoted',
+      tailorId: null,
+      fitSnapshot: null,
+      fabricTotal: 20000,
+      platformFee: fee,
+      deliveryFee: FAR_INTERSTATE_FEE,
+      totalAmount: 20000 + fee + FAR_INTERSTATE_FEE,
+    });
+  });
+
+  it('quotes the same server-authoritative total the checkout will charge', async () => {
+    const { body } = await as('customer').post('/orders/fabric-quote', toMe()).expect(201);
+    const fee = Math.round((20000 * feePercent) / 100);
+    expect(body).toMatchObject({
+      fabricTotal: 20000,
+      platformFee: fee,
+      deliveryFee: FAR_INTERSTATE_FEE,
+      totalAmount: 20000 + fee + FAR_INTERSTATE_FEE,
+      currency: 'NGN',
+    });
+    expect(body.shipments).toHaveLength(1);
+    expect(body.shipments[0]).toMatchObject({ band: 'inter_state', far: true, amount: FAR_INTERSTATE_FEE });
+  });
+
+  it('charges the intra-state rate and adds value tiers only to interstate shipments', async () => {
+    const { body: local } = await as('customer')
+      .post('/orders/fabric-quote', { ...toMe(), deliveryAddress: KANO_ADDRESS })
+      .expect(201);
+    expect(local.deliveryFee).toBe(INTRA_STATE_FEE);
+
+    const { body: valuable } = await as('customer')
+      .post('/orders/fabric-quote', { fabrics: [{ fabricId: ids.fabric, quantity: 31 }], destination: 'customer', deliveryAddress: ADDRESS })
+      .expect(201);
+    expect(valuable.fabricTotal).toBe(310000);
+    expect(valuable.deliveryFee).toBe(FAR_INTERSTATE_FEE + VALUE_TIER_SURCHARGE);
   });
 
   it('rejects a checkout without somewhere to send the fabric', async () => {
@@ -258,6 +303,14 @@ describe('Fabric checkout', () => {
       const { body } = await as('tailor').post(`/orders/${order.id}/items/${itemId}/receive`).expect(200);
       expect(body.status).toBe('completed');
       expect(await releases(order.id)).toHaveLength(1);
+      // The delivery fee stays with IPILE; receiving the fabric is not a tailor payout.
+      expect(await tailorReleases(order.id)).toHaveLength(0);
+      const platformFee = Math.round((20000 * feePercent) / 100);
+      expect(await app.get(EscrowService).summary(order.id)).toMatchObject({
+        held: 20000 + platformFee + FAR_INTERSTATE_FEE,
+        released: 20000,
+        balance: platformFee + FAR_INTERSTATE_FEE,
+      });
     });
   });
 

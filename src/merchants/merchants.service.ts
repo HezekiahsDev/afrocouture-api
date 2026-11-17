@@ -13,11 +13,12 @@ import { definedOnly } from '../common/defined-only.js';
 import { PAYOUT_FIELDS, notifyPayoutAccountChanged, resetRecipientIfChanged } from '../common/payout-account.js';
 
 /** Fields a verified merchant may keep editing without going back through review. */
-const LIVE_EDITABLE: (keyof SaveMerchantProfileDto)[] = ['marketHub', 'specialtyFabrics'];
+const LIVE_EDITABLE: (keyof SaveMerchantProfileDto)[] = ['marketHub', 'state', 'specialtyFabrics'];
 
 const REQUIRED_FOR_SUBMIT: [keyof MerchantProfile, string][] = [
   ['businessName', 'your registered business name'],
   ['city', 'your city'],
+  ['state', 'your state'],
   ['marketHub', 'your market or warehouse location'],
   ['sourcingType', 'how you source fabric'],
   ['cacNumber', 'your CAC number'],

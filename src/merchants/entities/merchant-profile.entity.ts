@@ -25,6 +25,10 @@ export class MerchantProfile {
   @Column({ type: 'varchar', nullable: true })
   city: string | null;
 
+  /** State the stock ships from; used to price fabric delivery. */
+  @Column({ type: 'varchar', nullable: true })
+  state: string | null;
+
   /** Market or warehouse the stock ships from, e.g. "Kantin Kwari Market, Kano". */
   @Column({ type: 'varchar', nullable: true })
   marketHub: string | null;
