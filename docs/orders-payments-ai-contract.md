@@ -45,6 +45,18 @@ Reads:
 Every state change appends an `order_events` row and emits `order.event` (see Events); every change also emails the
 other party (best effort, via `MailService`).
 
+## Fabric checkout (pay now, no commission)
+
+`POST /orders/fabric-checkout` `{ fabrics: [{ fabricId, quantity }] (1–20), destination: 'customer' | 'tailor', deliveryAddress? (with phone, required for 'customer'), tailorId? (required for 'tailor') }`
+creates an order with `type: 'fabric'`, no quote and no fit profile. `GET /orders/checkout-config` → `{ platformFeePercent }` lets the page show the exact total.
+
+- `totalAmount = fabricTotal + platformFee`. The order starts in `quoted` ("awaiting payment") and uses the normal `/pay` and `/verify-payment`. Paying removes those fabrics from the buyer's saved selection.
+- **Buyers** are customers (delivering to themselves or to an artisan) and verified artisans (delivering to their own workshop). Both pay as the order's `customerId`; `/pay`, `/verify-payment`, `/cancel` and `/dispute` accept either role.
+- Merchants ship as usual; `shipTo` is the buyer's address and phone for `'customer'`, and the workshop's address, `contactPhone` and `whatsappNumber` for `'tailor'`. An artisan can only be a fabric destination when their workshop has an address and both contact numbers on file (`canReceiveFabric` on the public tailor payload), so every courier has someone to reach.
+- `POST /orders/:id/items/:itemId/receive` is done by the recipient: the buyer (customer or artisan) or the tailor. It pays that merchant once all their lines arrived, and completes the order once every line has.
+- If every line shipped more than `AUTO_APPROVE_DAYS` ago and nobody confirmed or disputed, the order completes automatically and merchants are paid.
+- Disputes work as for commissions. Quotes, milestones, handover, reviews and chat don't apply. A tailor can't see a fabric order sent to them until it's paid.
+
 ## Payments — Paystack (`src/payments`)
 
 `PaystackService` wraps the REST API (`PAYSTACK_BASE_URL`, default `https://api.paystack.co`; bearer `PAYSTACK_SECRET_KEY`).

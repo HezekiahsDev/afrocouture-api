@@ -21,6 +21,9 @@ const LIVE_EDITABLE: (keyof SaveTailorProfileDto)[] = [
   'portraitUrl',
   'coverImageUrl',
   'portfolioUrls',
+  // Contact numbers are needed for fabric deliveries, and they change with the artisan's phone.
+  'contactPhone',
+  'whatsappNumber',
 ];
 
 /** Fields that must be filled before a profile can be submitted for review. */
@@ -33,6 +36,8 @@ const REQUIRED_FOR_SUBMIT: [keyof TailorProfile, string][] = [
   ['portraitUrl', 'a portrait photo'],
   ['legalName', 'your legal name'],
   ['workshopAddress', 'your workshop address'],
+  ['contactPhone', 'a contact phone number for deliveries'],
+  ['whatsappNumber', 'a WhatsApp number for deliveries'],
   ['idType', 'an ID type'],
   ['idDocumentUrl', 'a photo of your ID'],
   ['bankName', 'your payout bank'],
@@ -57,7 +62,16 @@ export type PublicTailor = Pick<
   | 'portfolioUrls'
   | 'reviewCount'
   | 'isSample'
-> & { rating: number | null; verified: boolean };
+> & {
+  rating: number | null;
+  verified: boolean;
+  /**
+   * True when fabric can be delivered to this artisan: a verified workshop with an
+   * address and contact numbers on file. Lets checkout hide artisans who can't receive
+   * fabric yet without exposing their private KYC fields.
+   */
+  canReceiveFabric: boolean;
+};
 
 export function toPublicTailor(p: TailorProfile): PublicTailor {
   return {
@@ -77,6 +91,13 @@ export function toPublicTailor(p: TailorProfile): PublicTailor {
     rating: p.rating === null ? null : Number(p.rating),
     verified: p.kycStatus === KycStatus.APPROVED && !p.isSample,
     isSample: p.isSample,
+    canReceiveFabric: Boolean(
+      p.kycStatus === KycStatus.APPROVED &&
+        !p.isSample &&
+        p.workshopAddress &&
+        p.contactPhone &&
+        p.whatsappNumber,
+    ),
   };
 }
 

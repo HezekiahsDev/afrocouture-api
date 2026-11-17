@@ -4,7 +4,7 @@ import { OnEvent } from '@nestjs/event-emitter';
 import { LessThan, Repository } from 'typeorm';
 import type { Namespace } from 'socket.io';
 import { ChatMessage, ChatMessageType } from './entities/chat-message.entity.js';
-import { Order, OrderMilestone, OrderStatus } from '../orders/entities/order.entity.js';
+import { Order, OrderMilestone, OrderStatus, OrderType } from '../orders/entities/order.entity.js';
 import { User } from '../users/entities/user.entity.js';
 import {
   NOTIFICATION_CREATED,
@@ -57,6 +57,7 @@ export class ChatService {
     if (order.customerId !== userId && order.tailorUserId !== userId) {
       throw new ForbiddenException('Only the customer and tailor on this order can use its chat.');
     }
+    if (order.type === OrderType.FABRIC) throw new ForbiddenException('Fabric orders do not have a chat.');
     return order;
   }
 
@@ -128,6 +129,7 @@ export class ChatService {
   /** Tells the other party about a message, unless they have this chat open right now. */
   private async notifyRecipient(order: Order, senderId: string, content: string) {
     const recipientId = senderId === order.customerId ? order.tailorUserId : order.customerId;
+    if (!recipientId) return;
     try {
       const watching = (await this.server?.in(roomFor(order.id)).fetchSockets())?.some(
         (s) => (s.data as { user?: User } | undefined)?.user?.id === recipientId,

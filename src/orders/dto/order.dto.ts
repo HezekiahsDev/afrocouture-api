@@ -1,9 +1,12 @@
 import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
+  ArrayMinSize,
   IsArray,
   IsBoolean,
   IsDateString,
+  IsDefined,
+  IsEnum,
   IsIn,
   IsInt,
   IsISO8601,
@@ -19,7 +22,8 @@ import {
   ValidateIf,
   ValidateNested,
 } from 'class-validator';
-import { OrderMilestone } from '../entities/order.entity.js';
+import { FabricDestination, OrderMilestone } from '../entities/order.entity.js';
+import { DeliveryAddressDto } from '../../measurements/dto/save-measurements.dto.js';
 
 const https = { protocols: ['https'], require_protocol: true };
 
@@ -56,6 +60,30 @@ export class CreateOrderDto {
 
   /** Add the fabrics from the customer's saved selection (with their saved quantities). */
   @IsOptional() @IsBoolean() useSavedFabrics?: boolean;
+}
+
+export const MAX_CHECKOUT_FABRICS = 20;
+
+/** Pay for fabric now, without a commission. */
+export class FabricCheckoutDto {
+  @IsArray()
+  @ArrayMinSize(1, { message: 'Add at least one fabric.' })
+  @ArrayMaxSize(MAX_CHECKOUT_FABRICS, { message: `Check out at most ${MAX_CHECKOUT_FABRICS} fabrics at a time.` })
+  @ValidateNested({ each: true })
+  @Type(() => OrderFabricDto)
+  fabrics: OrderFabricDto[];
+
+  @IsEnum(FabricDestination) destination: FabricDestination;
+
+  @ValidateIf((dto: FabricCheckoutDto) => dto.destination === FabricDestination.TAILOR)
+  @IsUUID()
+  tailorId?: string;
+
+  @ValidateIf((dto: FabricCheckoutDto) => dto.destination === FabricDestination.CUSTOMER)
+  @IsDefined({ message: 'Add the address to deliver to.' })
+  @ValidateNested()
+  @Type(() => DeliveryAddressDto)
+  deliveryAddress?: DeliveryAddressDto;
 }
 
 export class QuoteDto {

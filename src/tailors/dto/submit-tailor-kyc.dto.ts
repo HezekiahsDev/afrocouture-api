@@ -42,6 +42,20 @@ export class SaveTailorProfileDto {
 
   @IsOptional() @IsString() @Length(2, 120) legalName?: string;
   @IsOptional() @IsString() @MaxLength(300) workshopAddress?: string;
+
+  /** Phone the fabric merchant's courier calls when delivering to the workshop. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  @Matches(/^\+?[0-9 ]{7,16}$/, { message: 'Enter a valid phone number.' })
+  contactPhone?: string;
+
+  /** WhatsApp number for the same purpose (many couriers prefer it). */
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  @Matches(/^\+?[0-9 ]{7,16}$/, { message: 'Enter a valid phone number.' })
+  whatsappNumber?: string;
   @IsOptional() @IsString() @MaxLength(60) idType?: string;
   @IsOptional() @IsUrl(url) idDocumentUrl?: string;
   @IsOptional() @IsUrl(url) workshopPhotoUrl?: string;

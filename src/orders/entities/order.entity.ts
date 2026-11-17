@@ -21,6 +21,10 @@ import type { OrderItem } from './order-item.entity.js';
  *                                                                                                     │
  *                              customer approves (funds released) ◀──────────────────────────────────┤
  *                                       completed                    customer disputes ▶ disputed ──admin▶ completed | refunded
+ *
+ * A fabric order (OrderType.FABRIC) has no quote or production stages. It is created in
+ * `quoted`, meaning "awaiting payment", and goes quoted ▶ paid ▶ completed once whoever
+ * it was sent to confirms every line arrived.
  */
 export enum OrderStatus {
   REQUESTED = 'requested',
@@ -33,6 +37,19 @@ export enum OrderStatus {
   COMPLETED = 'completed',
   DISPUTED = 'disputed',
   REFUNDED = 'refunded',
+}
+
+export enum OrderType {
+  /** A garment made by a tailor, priced by their quote. */
+  COMMISSION = 'commission',
+  /** Fabric bought and paid for at checkout, with no garment attached. */
+  FABRIC = 'fabric',
+}
+
+/** Who a fabric order is shipped to. Only set on fabric orders. */
+export enum FabricDestination {
+  CUSTOMER = 'customer',
+  TAILOR = 'tailor',
 }
 
 /** Production stage shown on the 4-step tracker while the order is paid / in progress / delivered. */
@@ -72,13 +89,19 @@ export class Order {
   @Column({ type: 'uuid' })
   customerId: string;
 
-  /** TailorProfile.id */
-  @Column({ type: 'uuid' })
-  tailorId: string;
+  @Column({ type: 'enum', enum: OrderType, default: OrderType.COMMISSION })
+  type: OrderType;
+
+  @Column({ type: 'enum', enum: FabricDestination, nullable: true })
+  fabricDestination: FabricDestination | null;
+
+  /** TailorProfile.id. Null only on a fabric order delivered to the customer. */
+  @Column({ type: 'uuid', nullable: true })
+  tailorId: string | null;
 
   /** The tailor's User.id, denormalised for access checks. */
-  @Column({ type: 'uuid' })
-  tailorUserId: string;
+  @Column({ type: 'uuid', nullable: true })
+  tailorUserId: string | null;
 
   @Column({ type: 'enum', enum: OrderStatus, default: OrderStatus.REQUESTED })
   status: OrderStatus;
@@ -103,11 +126,13 @@ export class Order {
   @Column({ type: 'jsonb', default: () => "'[]'" })
   referenceImageUrls: string[];
 
-  @Column({ type: 'jsonb' })
-  fitSnapshot: FitSnapshot;
+  /** Null on fabric orders: nothing is being made. */
+  @Column({ type: 'jsonb', nullable: true })
+  fitSnapshot: FitSnapshot | null;
 
-  @Column({ type: 'jsonb' })
-  deliveryAddress: DeliveryAddress;
+  /** Null on a fabric order sent to a tailor, which ships to their workshop. */
+  @Column({ type: 'jsonb', nullable: true })
+  deliveryAddress: DeliveryAddress | null;
 
   @Column({ type: 'date', nullable: true })
   desiredDate: string | null;

@@ -234,7 +234,7 @@ describe('RBAC', () => {
 
     it.each([
       ['customer', 'quote'], ['merchant', 'quote'], ['tailor', 'approve'], ['merchant', 'dispute'],
-      ['customer', 'deliver'], ['tailor', 'pay'], ['admin', 'approve'],
+      ['customer', 'deliver'], ['admin', 'approve'],
     ])('%s cannot %s an order', async (who, action) => {
       await as(who).post(`/orders/${ids.order}/${action}`, {}).expect(403);
     });
@@ -302,6 +302,8 @@ describe('RBAC', () => {
     it('nor act on it', async () => {
       await as('otherCustomer').post(`/orders/${ids.order}/dispute`, { reason: 'Not mine but let me try' }).expect(404);
       await as('otherTailor').post(`/orders/${ids.order}/milestone`, { milestone: 'cutting' }).expect(404);
+      // Artisans may pay for fabric they buy themselves, never someone else's order.
+      await as('tailor').post(`/orders/${ids.order}/pay`, {}).expect(404);
     });
 
     it('nor read or write its chat', async () => {
@@ -376,7 +378,7 @@ describe('RBAC', () => {
     });
 
     it('public artisan and fabric responses carry no KYC or bank details', async () => {
-      const privateTailorFields = ['legalName', 'idDocumentUrl', 'workshopAddress', 'bankName', 'bankCode', 'accountNumber', 'accountName', 'paystackRecipientCode', 'userId', 'reviewNote'];
+      const privateTailorFields = ['legalName', 'idDocumentUrl', 'workshopAddress', 'contactPhone', 'whatsappNumber', 'bankName', 'bankCode', 'accountNumber', 'accountName', 'paystackRecipientCode', 'userId', 'reviewNote'];
       for (const body of [(await as(null).get(`/tailors/${ids.tailorProfile}`)).body, (await as(null).get('/tailors')).body[0]]) {
         for (const key of privateTailorFields) expect(body).not.toHaveProperty(key);
       }

@@ -60,6 +60,17 @@ export class TailorProfile {
   @Column({ type: 'text', nullable: true })
   workshopAddress: string | null;
 
+  /**
+   * Phone the fabric merchant calls about a delivery to the workshop. Required before
+   * fabric can be sent to this artisan — the courier needs someone to reach.
+   */
+  @Column({ type: 'varchar', length: 20, nullable: true })
+  contactPhone: string | null;
+
+  /** WhatsApp number for the same purpose; many couriers and merchants prefer it. */
+  @Column({ type: 'varchar', length: 20, nullable: true })
+  whatsappNumber: string | null;
+
   @Column({ type: 'varchar', nullable: true })
   idType: string | null;
 

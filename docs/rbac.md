@@ -105,15 +105,16 @@ Legend:
 | admin | role A | Everything, including escrow transactions. |
 | customer | `order.customerId` | The full order. |
 | tailor | `order.tailorUserId` | The full order, including the fit snapshot and delivery address. |
-| merchant | Owns a line **and the order is paid** | Their fabric lines, the atelier's shipping address, status and fabric events only. **Never** the customer's identity, brief, reference images, measurements or address. The order list gives merchants `customer: { id: null, fullName: null }` and `referenceImageUrls: []`. |
+| merchant | Owns a line **and the order is paid** | Their fabric lines, the atelier's shipping address and contact numbers (or the customer's, when they asked for direct delivery), status and fabric events only. **Never** the customer's identity, brief, reference images, measurements or address. The order list gives merchants `customer: { id: null, fullName: null }` and `referenceImageUrls: []`. |
 | anyone else | | 404 |
 
 | Route | Who |
 | --- | --- |
 | `GET /orders`, `GET /orders/:id` | any. The list is scoped to the caller's role; detail goes through `viewerOf`. |
 | `POST /orders` | C |
+| `POST /orders/fabric-checkout`, `GET /orders/checkout-config` | C or T. Artisans buy fabric for their own workshop; a tailor destination needs a workshop address and both contact numbers on file (else 409). |
 | `POST /orders/:id/quote`, `decline`, `milestone`, `deliver`, `items/:itemId/receive`, `review/reply` | T, must be the order's tailor (else 404) |
-| `POST /orders/:id/cancel`, `pay`, `verify-payment`, `approve`, `dispute`, `review` | C, must be the order's customer (else 404) |
+| `POST /orders/:id/cancel`, `pay`, `verify-payment`, `approve`, `dispute`, `review` | C or T (an artisan buying fabric), must be the order's customer (else 404) |
 | `POST /orders/:id/items/:itemId/ship` | M, must own the line (else 404) |
 | `GET/POST /orders/:id/messages`, socket `join_order` / `send_message` | The order's customer or tailor only. Merchants, admins and others get 403. |
 

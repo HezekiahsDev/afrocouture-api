@@ -3,6 +3,7 @@ import { OrdersService } from './orders.service.js';
 import {
   ApproveDto,
   CreateOrderDto,
+  FabricCheckoutDto,
   ListOrdersQuery,
   ListReviewsQuery,
   MilestoneDto,
@@ -27,6 +28,22 @@ export class OrdersController {
   @Roles(UserRole.CUSTOMER)
   create(@CurrentUser() user: User, @Body() dto: CreateOrderDto) {
     return this.orders.create(user, dto);
+  }
+
+  /**
+   * Buying fabric: customers buy for themselves or for an artisan's workshop, and
+   * artisans buy for their own workshop. Both pay as the order's customer.
+   */
+  @Post('fabric-checkout')
+  @Roles(UserRole.CUSTOMER, UserRole.TAILOR)
+  checkoutFabric(@CurrentUser() user: User, @Body() dto: FabricCheckoutDto) {
+    return this.orders.checkoutFabric(user, dto);
+  }
+
+  /** Declared before ':id', which would otherwise capture this path. */
+  @Get('checkout-config')
+  checkoutConfig() {
+    return this.orders.checkoutConfig();
   }
 
   @Get()
@@ -64,7 +81,7 @@ export class OrdersController {
 
   @Post(':id/items/:itemId/receive')
   @HttpCode(HttpStatus.OK)
-  @Roles(UserRole.TAILOR)
+  @Roles(UserRole.TAILOR, UserRole.CUSTOMER)
   receive(
     @CurrentUser() user: User,
     @Param('id', ParseUUIDPipe) id: string,
@@ -96,23 +113,25 @@ export class OrdersController {
 
   // ── Customer ──
 
+  // ── Customer (and artisans buying fabric for their own workshop) ──
+
   @Post(':id/cancel')
   @HttpCode(HttpStatus.OK)
-  @Roles(UserRole.CUSTOMER)
+  @Roles(UserRole.CUSTOMER, UserRole.TAILOR)
   cancel(@CurrentUser() user: User, @Param('id', ParseUUIDPipe) id: string) {
     return this.orders.cancel(user, id);
   }
 
   @Post(':id/pay')
   @HttpCode(HttpStatus.OK)
-  @Roles(UserRole.CUSTOMER)
+  @Roles(UserRole.CUSTOMER, UserRole.TAILOR)
   pay(@CurrentUser() user: User, @Param('id', ParseUUIDPipe) id: string) {
     return this.orders.pay(user, id);
   }
 
   @Post(':id/verify-payment')
   @HttpCode(HttpStatus.OK)
-  @Roles(UserRole.CUSTOMER)
+  @Roles(UserRole.CUSTOMER, UserRole.TAILOR)
   verifyPayment(@CurrentUser() user: User, @Param('id', ParseUUIDPipe) id: string, @Body() dto: VerifyPaymentDto) {
     return this.orders.verifyPayment(user, id, dto.reference);
   }
@@ -126,7 +145,7 @@ export class OrdersController {
 
   @Post(':id/dispute')
   @HttpCode(HttpStatus.OK)
-  @Roles(UserRole.CUSTOMER)
+  @Roles(UserRole.CUSTOMER, UserRole.TAILOR)
   dispute(@CurrentUser() user: User, @Param('id', ParseUUIDPipe) id: string, @Body() dto: ReasonDto) {
     return this.orders.dispute(user, id, dto);
   }

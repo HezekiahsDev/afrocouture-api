@@ -13,13 +13,15 @@ import { SchedulerRegistry } from '@nestjs/schedule';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { Brackets, DataSource, EntityManager, In, IsNull, LessThan, Not } from 'typeorm';
 import { randomInt } from 'node:crypto';
-import { Order, OrderMilestone, OrderStatus, FitSnapshot } from './entities/order.entity.js';
+import { FabricDestination, Order, OrderMilestone, OrderStatus, OrderType, FitSnapshot } from './entities/order.entity.js';
 import { FabricFulfilment, OrderItem } from './entities/order-item.entity.js';
 import { OrderEvent } from './entities/order-event.entity.js';
 import {
   ApproveDto,
   CreateOrderDto,
+  FabricCheckoutDto,
   ListOrdersQuery,
+  MAX_CHECKOUT_FABRICS,
   MilestoneDto,
   NoteDto,
   QuoteDto,
@@ -69,6 +71,7 @@ const naira = (n: number) => `₦${n.toLocaleString('en-NG')}`;
 /** Customers can rate an order for this long after it completes. */
 const REVIEW_WINDOW_DAYS = 60;
 const REVIEWABLE: OrderStatus[] = [OrderStatus.COMPLETED, OrderStatus.REFUNDED];
+const FABRIC_ORDER_TITLE = 'Fabric order';
 const MEASUREMENTS = ['chest', 'shoulderWidth', 'sleeveLength', 'kaftanLength', 'waist', 'neck'] as const;
 
 @Injectable()
@@ -106,12 +109,7 @@ export class OrdersService implements OnModuleInit {
   // ───────────────────────── Create & read ─────────────────────────
 
   async create(customer: User, dto: CreateOrderDto) {
-    const tailor = await this.dataSource.getRepository(TailorProfile).findOne({ where: { id: dto.tailorId } });
-    if (!tailor || tailor.kycStatus !== KycStatus.APPROVED) throw new NotFoundException('This artisan could not be found.');
-    if (tailor.isSample || !tailor.userId) {
-      throw new ConflictException('This is a sample artisan profile and can’t take commissions. Choose a verified artisan.');
-    }
-    if (tailor.userId === customer.id) throw new BadRequestException('You can’t commission yourself.');
+    const tailor = await this.orderableTailor(customer, dto.tailorId);
 
     const fit = await this.dataSource.getRepository(CustomerFitProfile).findOne({ where: { userId: customer.id } });
     if (!fit || !MEASUREMENTS.some((k) => fit[k] !== null) || !fit.deliveryAddress) {
@@ -181,6 +179,51 @@ export class OrdersService implements OnModuleInit {
     return this.get(customer, order.id);
   }
 
+  /** Pay for fabric now. The order waits for payment, then the merchants ship it. */
+  async checkoutFabric(customer: User, dto: FabricCheckoutDto) {
+    const toTailor = dto.destination === FabricDestination.TAILOR;
+    const tailor = toTailor ? await this.orderableTailor(customer, dto.tailorId!, 'fabric') : null;
+    if (!toTailor && !dto.deliveryAddress?.phone) {
+      throw new BadRequestException('Add a phone number so the courier can reach you.');
+    }
+
+    const items = await this.buildItems(customer, { fabrics: dto.fabrics }, MAX_CHECKOUT_FABRICS);
+    const fabricTotal = items.reduce((sum, item) => sum + item.lineTotal, 0);
+    const platformFee = this.platformFee(fabricTotal);
+
+    const { order, events } = await this.transaction(async (em, events) => {
+      const order = em.create(Order, {
+        type: OrderType.FABRIC,
+        fabricDestination: dto.destination,
+        reference: await this.uniqueReference(em),
+        customerId: customer.id,
+        tailorId: tailor?.id ?? null,
+        tailorUserId: tailor?.userId ?? null,
+        status: OrderStatus.QUOTED,
+        milestone: OrderMilestone.PLACED,
+        garmentType: FABRIC_ORDER_TITLE,
+        brief: '',
+        referenceImageUrls: [],
+        fitSnapshot: null,
+        deliveryAddress: toTailor ? null : dto.deliveryAddress!,
+        fabricTotal,
+        platformFee,
+        totalAmount: fabricTotal + platformFee,
+        items: items.map((i) => em.create(OrderItem, i)),
+      });
+      const saved = await em.save(order);
+      await this.record(em, events, saved, 'fabric_checkout', 'Fabric order placed — waiting for payment', customer.id);
+      return saved;
+    });
+    this.flush(events);
+    return this.get(customer, order.id);
+  }
+
+  /** What the checkout page needs to show the same total Paystack will charge. */
+  checkoutConfig() {
+    return { platformFeePercent: this.feePercent };
+  }
+
   async list(user: User, query: ListOrdersQuery) {
     const role = query.role ?? this.defaultRole(user);
     const statuses = query.status
@@ -216,6 +259,8 @@ export class OrdersService implements OnModuleInit {
         relations: { items: true },
         order: { createdAt: 'DESC' },
       });
+      // A tailor only hears about fabric coming their way once it is paid for.
+      if (role === 'tailor') orders = orders.filter((o) => o.type === OrderType.COMMISSION || o.paidAt !== null);
     }
 
     const tailors = await this.tailorSummaries(orders.map((o) => o.tailorId));
@@ -225,6 +270,8 @@ export class OrdersService implements OnModuleInit {
       const base = {
         id: o.id,
         reference: o.reference,
+        type: o.type,
+        fabricDestination: o.fabricDestination,
         status: o.status,
         milestone: o.milestone,
         garmentType: o.garmentType,
@@ -266,6 +313,7 @@ export class OrdersService implements OnModuleInit {
     const { order, events } = await this.transaction(async (em, events) => {
       const order = await this.lockOrder(em, id);
       this.assertTailor(order, user);
+      this.assertCommission(order);
       this.assertStatus(order, [OrderStatus.REQUESTED, OrderStatus.QUOTED], 'quote');
       const subtotal = dto.workmanshipPrice + dto.deliveryFee + order.fabricTotal;
       order.workmanshipPrice = dto.workmanshipPrice;
@@ -273,7 +321,7 @@ export class OrdersService implements OnModuleInit {
       order.estimatedDeliveryDate = dto.estimatedDeliveryDate;
       order.quoteNote = dto.note?.trim() || null;
       order.quotedAt = new Date();
-      order.platformFee = Math.round((subtotal * this.feePercent) / 100);
+      order.platformFee = this.platformFee(subtotal);
       order.totalAmount = subtotal + order.platformFee;
       order.status = OrderStatus.QUOTED;
       await em.save(order);
@@ -298,6 +346,7 @@ export class OrdersService implements OnModuleInit {
     const { order, events } = await this.transaction(async (em, events) => {
       const order = await this.lockOrder(em, id);
       this.assertTailor(order, user);
+      this.assertCommission(order);
       this.assertStatus(order, [OrderStatus.REQUESTED, OrderStatus.QUOTED], 'decline');
       order.status = OrderStatus.DECLINED;
       order.declineReason = dto.reason.trim();
@@ -325,9 +374,11 @@ export class OrdersService implements OnModuleInit {
       return order;
     });
     this.flush(events);
-    void this.notifyUser(order.tailorUserId, `Request ${order.reference} was cancelled`, [
-      'The customer cancelled this commission request before paying.',
-    ], order.id, 'order_cancelled');
+    if (order.type === OrderType.COMMISSION) {
+      void this.notifyUser(order.tailorUserId, `Request ${order.reference} was cancelled`, [
+        'The customer cancelled this commission request before paying.',
+      ], order.id, 'order_cancelled');
+    }
     return this.get(user, id);
   }
 
@@ -407,6 +458,7 @@ export class OrdersService implements OnModuleInit {
         order.milestone = OrderMilestone.PLACED;
         await em.save(order);
         await this.record(em, events, order, 'paid', `Payment of ${naira(order.totalAmount)} received and held in escrow`, actorUserId);
+        if (order.type === OrderType.FABRIC) await this.removeFromSaved(em, order);
         return order;
       }
 
@@ -440,6 +492,7 @@ export class OrdersService implements OnModuleInit {
     const { order, events } = await this.transaction(async (em, events) => {
       const order = await this.lockOrder(em, id);
       this.assertTailor(order, user);
+      this.assertCommission(order);
       this.assertStatus(order, [OrderStatus.PAID, OrderStatus.IN_PROGRESS], 'update');
       if (MILESTONE_ORDER.indexOf(dto.milestone) <= MILESTONE_ORDER.indexOf(order.milestone)) {
         throw new BadRequestException('Milestones only move forward.');
@@ -476,16 +529,26 @@ export class OrdersService implements OnModuleInit {
       item.shippedAt = new Date();
       item.shippingNote = dto.note?.trim() || null;
       await em.save(item);
-      await this.record(em, events, order, 'fabric_shipped', `${item.fabricName} shipped to the atelier${item.shippingNote ? ` (${item.shippingNote})` : ''}`, user.id, {
+      const place = this.toCustomer(order) ? 'the customer' : 'the atelier';
+      await this.record(em, events, order, 'fabric_shipped', `${item.fabricName} shipped to ${place}${item.shippingNote ? ` (${item.shippingNote})` : ''}`, user.id, {
         itemId: item.id,
       });
       return { order, item };
     }).then(({ order: result, events }) => ({ ...result, events }));
     this.flush(events);
-    void this.notifyUser(order.tailorUserId, `Fabric on its way for ${order.reference}`, [
+    void this.notifyUser(this.toCustomer(order) ? order.customerId : order.tailorUserId, `Fabric on its way for ${order.reference}`, [
       `${item.quantity} ${item.unit}${item.quantity === 1 ? '' : 's'} of ${item.fabricName} has been shipped to you.`,
       item.shippingNote ? `Shipping note: ${item.shippingNote}` : 'Mark it as received when it arrives.',
     ], order.id, 'fabric_shipped');
+    if (order.type === OrderType.FABRIC && !this.toCustomer(order)) {
+      void this.notifications.notify(order.customerId, {
+        type: 'fabric_shipped',
+        title: `Fabric on its way · ${order.reference}`,
+        body: `${item.fabricName} has been shipped to your artisan.`,
+        link: `/orders/${order.id}`,
+        orderId: order.id,
+      });
+    }
     return this.get(user, id);
   }
 
@@ -493,7 +556,8 @@ export class OrdersService implements OnModuleInit {
     const payouts: EscrowTransaction[] = [];
     const { order, events } = await this.transaction(async (em, events) => {
       const order = await this.lockOrder(em, id);
-      this.assertTailor(order, user);
+      if (this.toCustomer(order)) this.assertCustomer(order, user);
+      else this.assertTailor(order, user);
       const item = await em.findOne(OrderItem, { where: { id: itemId, orderId: id } });
       if (!item) throw new NotFoundException('Fabric line not found.');
       this.assertStatus(order, [OrderStatus.PAID, OrderStatus.IN_PROGRESS, OrderStatus.DELIVERED], 'receive fabric for');
@@ -505,7 +569,7 @@ export class OrdersService implements OnModuleInit {
       item.fulfilment = FabricFulfilment.RECEIVED;
       item.receivedAt = new Date();
       await em.save(item);
-      await this.record(em, events, order, 'fabric_received', `${item.fabricName} received at the atelier`, user.id, { itemId: item.id });
+      await this.record(em, events, order, 'fabric_received', `${item.fabricName} received ${this.toCustomer(order) ? 'by the customer' : 'at the atelier'}`, user.id, { itemId: item.id });
 
       // Pay the merchant once all of their fabric on this order has arrived.
       const lines = await em.find(OrderItem, { where: { orderId: id, merchantId: item.merchantId } });
@@ -519,11 +583,27 @@ export class OrdersService implements OnModuleInit {
           });
         }
       }
+
+      if (order.type === OrderType.FABRIC) {
+        const all = await em.find(OrderItem, { where: { orderId: id } });
+        if (all.every((l) => l.fulfilment === FabricFulfilment.RECEIVED)) {
+          await this.completeOrder(em, events, order, payouts, user.id, 'completed', 'All fabric received — order complete');
+        }
+      }
       return order;
     });
     for (const p of payouts) await this.escrow.execute(p);
     this.flush(events);
     for (const payout of payouts) void this.notifyMerchantPaid(order, payout);
+    if (order.type === OrderType.FABRIC && !this.toCustomer(order)) {
+      void this.notifications.notify(order.customerId, {
+        type: 'fabric_received',
+        title: `Your artisan has your fabric · ${order.reference}`,
+        body: 'They confirmed it arrived at their workshop.',
+        link: `/orders/${order.id}`,
+        orderId: order.id,
+      });
+    }
     return this.get(user, id);
   }
 
@@ -531,6 +611,7 @@ export class OrdersService implements OnModuleInit {
     const { order, events } = await this.transaction(async (em, events) => {
       const order = await this.lockOrder(em, id);
       this.assertTailor(order, user);
+      this.assertCommission(order);
       this.assertStatus(order, [OrderStatus.IN_PROGRESS], 'hand over');
       if (order.milestone !== OrderMilestone.DELIVERY) {
         throw new BadRequestException('Move the order to the handover stage before marking it delivered.');
@@ -605,6 +686,7 @@ export class OrdersService implements OnModuleInit {
     const order = await this.dataSource.transaction(async (em) => {
       const order = await this.lockOrder(em, id);
       this.assertCustomer(order, user);
+      this.assertCommission(order);
       this.assertStatus(order, REVIEWABLE, 'review');
       if (order.rating !== null) throw new ConflictException('You have already reviewed this order.');
       const finished = order.completedAt ?? order.updatedAt;
@@ -870,6 +952,41 @@ export class OrdersService implements OnModuleInit {
         });
       }
     }
+    return completed + (await this.autoCompleteFabricOrders(cutoff, days));
+  }
+
+  /**
+   * Completes fabric orders whose every line shipped over AUTO_APPROVE_DAYS ago, so a
+   * recipient who never confirms can't hold a merchant's money forever.
+   */
+  private async autoCompleteFabricOrders(cutoff: Date, days: number): Promise<number> {
+    const open = await this.dataSource.getRepository(Order).find({
+      where: { type: OrderType.FABRIC, status: In([OrderStatus.PAID, OrderStatus.IN_PROGRESS]) },
+      relations: { items: true },
+    });
+    const due = open.filter((o) => o.items.length > 0 && o.items.every((i) => i.shippedAt !== null && i.shippedAt < cutoff));
+    let completed = 0;
+    for (const { id } of due) {
+      const payouts: EscrowTransaction[] = [];
+      const { order, events } = await this.transaction(async (em, events) => {
+        const order = await this.lockOrder(em, id);
+        if (order.status !== OrderStatus.PAID && order.status !== OrderStatus.IN_PROGRESS) return order;
+        await this.completeOrder(em, events, order, payouts, null, 'auto_completed', `Completed automatically ${days} days after shipping — payment released to the merchants`);
+        return order;
+      });
+      for (const p of payouts) await this.escrow.execute(p);
+      this.flush(events);
+      if (order.status === OrderStatus.COMPLETED) {
+        completed++;
+        void this.notifications.notify(order.customerId, {
+          type: 'order_completed',
+          title: `Order ${order.reference} is complete`,
+          body: 'Your fabric shipped a while ago and nobody reported a problem, so we released payment to the merchants.',
+          link: `/orders/${order.id}`,
+          orderId: order.id,
+        });
+      }
+    }
     return completed;
   }
 
@@ -977,13 +1094,15 @@ export class OrdersService implements OnModuleInit {
       const payout = await this.escrow.reserveRelease(em, order, { type: 'merchant', id: merchantId }, amount);
       if (payout) payouts.push(payout);
     }
+    if (!order.tailorId) return;
     const tailorAmount = (order.workmanshipPrice ?? 0) + (order.deliveryFee ?? 0);
     const payout = await this.escrow.reserveRelease(em, order, { type: 'tailor', id: order.tailorId }, tailorAmount);
     if (payout) payouts.push(payout);
   }
 
   /** Sets the artisan's average and count from their visible reviews (sample artisans keep their seeded figures). */
-  private async recomputeRating(em: EntityManager, tailorId: string) {
+  private async recomputeRating(em: EntityManager, tailorId: string | null) {
+    if (!tailorId) return;
     const tailor = await em.findOne(TailorProfile, { where: { id: tailorId }, select: { id: true, isSample: true } });
     if (!tailor || tailor.isSample) return;
     const row = await em
@@ -1006,7 +1125,7 @@ export class OrdersService implements OnModuleInit {
     await this.notifications.notify(merchant?.userId, {
       type: 'payout',
       title: `Fabric received · ${order.reference}`,
-      body: `The artisan confirmed your fabric arrived. ${naira(payout.amount)} is on its way to your bank account.`,
+      body: `${this.toCustomer(order) ? 'The customer' : 'The artisan'} confirmed your fabric arrived. ${naira(payout.amount)} is on its way to your bank account.`,
       link: `/orders/${order.id}`,
       orderId: order.id,
     });
@@ -1014,7 +1133,8 @@ export class OrdersService implements OnModuleInit {
 
   private async buildItems(
     customer: User,
-    dto: CreateOrderDto,
+    dto: Pick<CreateOrderDto, 'fabrics' | 'useSavedFabrics'>,
+    maxFabrics = 5,
   ): Promise<Pick<OrderItem, 'fabricId' | 'merchantId' | 'fabricName' | 'imageUrl' | 'unit' | 'quantity' | 'unitPrice' | 'lineTotal'>[]> {
     const wanted = new Map<string, number>();
     if (dto.useSavedFabrics) {
@@ -1024,7 +1144,7 @@ export class OrdersService implements OnModuleInit {
       for (const s of saved) wanted.set(s.itemId, s.quantity ?? 1);
     }
     for (const f of dto.fabrics ?? []) wanted.set(f.fabricId, f.quantity);
-    if (wanted.size > 5) throw new BadRequestException('Add at most 5 fabrics to one order.');
+    if (wanted.size > maxFabrics) throw new BadRequestException(`Add at most ${maxFabrics} fabrics to one order.`);
     if (!wanted.size) return [];
 
     const fabrics = await this.dataSource
@@ -1070,6 +1190,58 @@ export class OrdersService implements OnModuleInit {
       });
   }
 
+  private async orderableTailor(
+    customer: User,
+    tailorId: string,
+    purpose: 'commission' | 'fabric' = 'commission',
+  ): Promise<TailorProfile> {
+    const tailor = await this.dataSource.getRepository(TailorProfile).findOne({ where: { id: tailorId } });
+    if (!tailor || tailor.kycStatus !== KycStatus.APPROVED) throw new NotFoundException('This artisan could not be found.');
+    if (tailor.isSample || !tailor.userId) {
+      throw new ConflictException(
+        purpose === 'fabric'
+          ? 'This is a sample artisan profile and can’t receive fabric. Choose a verified artisan.'
+          : 'This is a sample artisan profile and can’t take commissions. Choose a verified artisan.',
+      );
+    }
+    if (tailor.userId === customer.id) {
+      throw new BadRequestException(
+        purpose === 'fabric'
+          ? 'You can’t send fabric to yourself. Choose another artisan, or deliver it to your own address.'
+          : 'You can’t commission yourself.',
+      );
+    }
+    // A merchant can only ship to a workshop they can find and phone, so fabric needs both on file.
+    if (purpose === 'fabric' && (!tailor.workshopAddress || !tailor.contactPhone || !tailor.whatsappNumber)) {
+      throw new ConflictException(
+        `${tailor.atelierName ?? tailor.displayName ?? 'This artisan'} hasn’t added a delivery address and contact number yet, so fabric can’t be sent to their workshop. Choose another artisan, or deliver it to your own address.`,
+      );
+    }
+    return tailor;
+  }
+
+  private platformFee(subtotal: number): number {
+    return Math.round((subtotal * this.feePercent) / 100);
+  }
+
+  /** Paid-for fabric leaves the customer's selection so it can't be bought twice by accident. */
+  private async removeFromSaved(em: EntityManager, order: Order) {
+    const items = await em.find(OrderItem, { where: { orderId: order.id }, select: { fabricId: true } });
+    await em.delete(SavedItem, {
+      userId: order.customerId,
+      itemType: SavedItemType.FABRIC,
+      itemId: In(items.map((i) => i.fabricId)),
+    });
+  }
+
+  private toCustomer(order: Order): boolean {
+    return order.fabricDestination === FabricDestination.CUSTOMER;
+  }
+
+  private assertCommission(order: Order) {
+    if (order.type === OrderType.FABRIC) throw new ConflictException('This is a fabric order, so it has no quote or production stages.');
+  }
+
   private assertCustomer(order: Order, user: User) {
     if (order.customerId !== user.id) throw new NotFoundException('Order not found.');
   }
@@ -1093,7 +1265,7 @@ export class OrdersService implements OnModuleInit {
   private async viewerOf(user: User, order: Order): Promise<Viewer | null> {
     if (user.role === UserRole.ADMIN) return 'admin';
     if (order.customerId === user.id) return 'customer';
-    if (order.tailorUserId === user.id) return 'tailor';
+    if (order.tailorUserId === user.id && (order.type === OrderType.COMMISSION || order.paidAt)) return 'tailor';
     if (order.paidAt) {
       const merchant = await this.dataSource.getRepository(MerchantProfile).findOne({ where: { userId: user.id } });
       if (merchant && order.items.some((i) => i.merchantId === merchant.id)) return 'merchant';
@@ -1113,12 +1285,17 @@ export class OrdersService implements OnModuleInit {
 
     if (viewer === 'merchant') {
       const merchant = await this.dataSource.getRepository(MerchantProfile).findOne({ where: { userId: user.id } });
-      const workshop = await this.dataSource.getRepository(TailorProfile).findOne({ where: { id: order.tailorId } });
+      const workshop = order.tailorId
+        ? await this.dataSource.getRepository(TailorProfile).findOne({ where: { id: order.tailorId } })
+        : null;
       const items = order.items.filter((i) => i.merchantId === merchant?.id);
+      const address = this.toCustomer(order) ? order.deliveryAddress : null;
       return {
         viewerRole: viewer,
         id: order.id,
         reference: order.reference,
+        type: order.type,
+        fabricDestination: order.fabricDestination,
         status: order.status,
         milestone: order.milestone,
         garmentType: order.garmentType,
@@ -1127,9 +1304,24 @@ export class OrdersService implements OnModuleInit {
         tailor,
         items,
         merchantTotal: items.reduce((s, i) => s + i.lineTotal, 0),
-        shipTo: workshop
-          ? { name: workshop.atelierName ?? workshop.displayName, address: workshop.workshopAddress, city: workshop.city }
-          : null,
+        // A direct delivery is the one case a merchant needs the customer's address and phone.
+        shipTo: address
+          ? {
+              name: customer.fullName,
+              address: [address.line1, address.landmark && `Landmark: ${address.landmark}`].filter(Boolean).join(', '),
+              city: `${address.city}, ${address.state}`,
+              phone: address.phone ?? null,
+              whatsapp: null,
+            }
+          : workshop
+            ? {
+                name: workshop.atelierName ?? workshop.displayName,
+                address: workshop.workshopAddress,
+                city: workshop.city,
+                phone: workshop.contactPhone,
+                whatsapp: workshop.whatsappNumber,
+              }
+            : null,
         events: events.filter((e) => ['paid', 'fabric_shipped', 'fabric_received', 'completed', 'resolved'].includes(e.type)),
       };
     }
@@ -1140,9 +1332,9 @@ export class OrdersService implements OnModuleInit {
     return view;
   }
 
-  private async tailorSummaries(ids: string[]) {
-    const unique = [...new Set(ids)];
-    const map = new Map<string, Pick<TailorProfile, 'id' | 'displayName' | 'atelierName' | 'portraitUrl' | 'city'>>();
+  private async tailorSummaries(ids: (string | null)[]) {
+    const unique = [...new Set(ids.filter((id): id is string => id !== null))];
+    const map = new Map<string | null, Pick<TailorProfile, 'id' | 'displayName' | 'atelierName' | 'portraitUrl' | 'city'>>();
     if (!unique.length) return map;
     const rows = await this.dataSource.getRepository(TailorProfile).find({
       where: { id: In(unique) },
@@ -1162,30 +1354,78 @@ export class OrdersService implements OnModuleInit {
   }
 
   /** Emails the person and adds the same update to their notification centre. */
-  private async notifyUser(userId: string, subject: string, lines: string[], orderId: string, type: string) {
+  private async notifyUser(userId: string | null, subject: string, lines: string[], orderId: string, type: string) {
+    if (!userId) return;
     void this.notifications.notify(userId, { type, title: subject, body: lines[0], link: `/orders/${orderId}`, orderId });
     const user = await this.dataSource.getRepository(User).findOne({ where: { id: userId } });
     await sendOrderMail(this.mail, user?.email, subject, lines, `${this.frontendUrl}/orders/${orderId}`);
   }
 
   private async notifyPaid(order: Order) {
+    if (order.type === OrderType.FABRIC) return this.notifyFabricPaid(order);
+
     await this.notifyUser(order.tailorUserId, `Payment received for ${order.reference}`, [
       `The customer paid ${naira(order.totalAmount)}; it is held in escrow until they approve the finished piece.`,
       'You can start work. Update the milestones as you go.',
     ], order.id, 'order_paid');
 
+    const workshop = await this.workshopOf(order);
+    await this.askMerchantsToShip(
+      order,
+      'Please ship the following to the artisan’s atelier:',
+      `Ship to: ${workshop?.atelierName ?? 'the atelier'}, ${workshop?.workshopAddress ?? ''}${workshop?.city ? `, ${workshop.city}` : ''}`,
+      'You are paid once the artisan confirms the fabric has arrived.',
+    );
+  }
+
+  private async notifyFabricPaid(order: Order) {
+    if (this.toCustomer(order)) {
+      const a = order.deliveryAddress!;
+      const names = await this.userNames([order.customerId]);
+      await this.askMerchantsToShip(
+        order,
+        'Please ship the following to the customer:',
+        `Ship to: ${names.get(order.customerId) ?? 'The customer'}, ${a.line1}${a.landmark ? ` (${a.landmark})` : ''}, ${a.city}, ${a.state}. Phone: ${a.phone ?? 'not given'}`,
+        'You are paid once the customer confirms the fabric has arrived.',
+      );
+      return;
+    }
+
+    const names = await this.userNames([order.customerId]);
+    await this.notifyUser(order.tailorUserId, `Fabric is coming to your workshop · ${order.reference}`, [
+      `${names.get(order.customerId) ?? 'A customer'} bought fabric and is having it sent to you.`,
+      'Mark each piece as received when it arrives.',
+    ], order.id, 'fabric_incoming');
+
+    const workshop = await this.workshopOf(order);
+    const place = workshop?.atelierName ?? 'the atelier';
+    const contact = [workshop?.contactPhone && `Phone: ${workshop.contactPhone}`, workshop?.whatsappNumber && `WhatsApp: ${workshop.whatsappNumber}`]
+      .filter(Boolean)
+      .join(' · ');
+    await this.askMerchantsToShip(
+      order,
+      'Please ship the following to the artisan’s atelier:',
+      `Ship to: ${place}, ${workshop?.workshopAddress ?? ''}${workshop?.city ? `, ${workshop.city}` : ''}${contact ? `. ${contact}` : ''}`,
+      'You are paid once the artisan confirms the fabric has arrived.',
+    );
+  }
+
+  private workshopOf(order: Order) {
+    return order.tailorId ? this.dataSource.getRepository(TailorProfile).findOne({ where: { id: order.tailorId } }) : Promise.resolve(null);
+  }
+
+  private async askMerchantsToShip(order: Order, heading: string, shipTo: string, payment: string) {
     const items = await this.dataSource.getRepository(OrderItem).find({ where: { orderId: order.id } });
     if (!items.length) return;
-    const workshop = await this.dataSource.getRepository(TailorProfile).findOne({ where: { id: order.tailorId } });
     const merchants = await this.dataSource.getRepository(MerchantProfile).find({ where: { id: In([...new Set(items.map((i) => i.merchantId))]) } });
     for (const merchant of merchants) {
       if (!merchant.userId) continue;
       const mine = items.filter((i) => i.merchantId === merchant.id);
       await this.notifyUser(merchant.userId, `New fabric order ${order.reference}`, [
-        'Please ship the following to the artisan’s atelier:',
+        heading,
         ...mine.map((i) => `• ${i.quantity} ${i.unit}${i.quantity === 1 ? '' : 's'} of ${i.fabricName}`),
-        `Ship to: ${workshop?.atelierName ?? 'the atelier'}, ${workshop?.workshopAddress ?? ''}${workshop?.city ? `, ${workshop.city}` : ''}`,
-        'You are paid once the artisan confirms the fabric has arrived.',
+        shipTo,
+        payment,
       ], order.id, 'fabric_order');
     }
   }
