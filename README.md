@@ -83,6 +83,9 @@ See `.env.example`. Beyond the database and JWT secrets:
 | `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET`, `CLOUDINARY_FOLDER` | File uploads (KYC documents, CAC certificates, fit photos, fabric images). Uploads return 503 until these are set. |
 
 | `PAYSTACK_SECRET_KEY`, `PAYSTACK_BASE_URL`, `PAYMENT_CALLBACK_URL` | Paystack checkout, webhook verification, payouts and refunds. Payment endpoints return 503 until the key is set. |
+| `STELLAR_ENABLED`, `STELLAR_PAYOUTS_ENABLED`, `STELLAR_NETWORK`, `STELLAR_HORIZON_URL`, `STELLAR_OPERATING_PUBLIC`, `STELLAR_OPERATING_SECRET`, `STELLAR_USDC_ISSUER`, `STELLAR_TREASURY_PUBLIC` | USDC checkout and payouts on Stellar. Off by default; Stellar endpoints return 503 until enabled. The secret belongs in a secrets manager. See [`docs/stellar-payments-plan.md`](docs/stellar-payments-plan.md). |
+| `STELLAR_QUOTE_TTL_MIN`, `STELLAR_FX_SPREAD_BPS`, `STELLAR_LATE_TOLERANCE_BPS`, `STELLAR_OVERPAY_REFUND_BPS`, `STELLAR_FLOAT_MAX_USDC`, `STELLAR_MIN_XLM`, `STELLAR_POLL_MS` | Stellar quote lifetime, spread, late/overpay handling, treasury alerts and how often payments are polled. |
+| `FX_RATE_PROVIDER`, `FX_NGN_PER_USDC`, `FX_RATE_URL`, `FX_RATE_JSON_PATH`, `FX_RATE_MIN`, `FX_RATE_MAX` | Naira-per-USDC rate for Stellar (`fixed` or `url`), with sanity bounds. |
 | `PLATFORM_FEE_PERCENT`, `AUTO_APPROVE_DAYS` | Fee added to each order (default 0) and days before a delivered order auto-completes (default 7) |
 | `VERTEX_AI_PROJECT_ID`, `VERTEX_AI_LOCATION`, `VERTEX_IMAGEN_MODEL`, `GOOGLE_APPLICATION_CREDENTIALS_JSON` | AI Design Studio (Vertex AI Imagen). AI Studio returns 503 until configured. |
 | `AI_DAILY_LIMIT` | AI generations per person per UTC day (default 20) |
@@ -100,6 +103,10 @@ The full contract is in [`docs/orders-payments-ai-contract.md`](docs/orders-paym
   the artisan confirms it arrived.
 - **Paystack setup:** in the dashboard set the webhook URL to `https://<api-domain>/payments/paystack/webhook`, enable
   Transfers and turn off the transfer OTP so payouts can run automatically, and keep a balance for payouts.
+- **Stellar (USDC):** customers can pay with `POST /orders/:id/pay {"method":"stellar"}`, which returns an amount, address and
+  memo. A watcher polls Horizon and settles matching payments into the same escrow ledger (amounts stay in naira). Payees
+  can choose USDC payouts. Payments without a usable memo go to Admin → Stellar. Details in
+  [`docs/orders-payments-ai-contract.md`](docs/orders-payments-ai-contract.md#payments--stellar-usdc).
 - **Chat:** Socket.IO namespace `/chat` (access token in `auth.token`) plus REST history at `/orders/:id/messages`.
   nginx must pass WebSocket upgrades (the provided `scripts/setup-nginx.sh` does).
 - **AI Studio:** `/ai-studio/*`; images are generated with Imagen and stored on Cloudinary.

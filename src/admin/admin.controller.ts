@@ -26,12 +26,17 @@ import { HideReviewDto, ListReviewsQuery, ResolveDisputeDto } from '../orders/dt
 import { EscrowService } from '../escrow/escrow.service.js';
 import { EscrowTransactionStatus } from '../escrow/entities/escrow-transaction.entity.js';
 import { ChatService } from '../chat/chat.service.js';
+import { StellarCheckoutService } from '../orders/stellar-checkout.service.js';
+import { UnmatchedStatus } from '../payments/stellar/entities/stellar-unmatched-deposit.entity.js';
 import { AuditService } from './audit/audit.service.js';
 import { AdminOverviewService } from './admin-overview.service.js';
 import { AdminUsersService } from './admin-users.service.js';
 import { AdminFabricsService } from './admin-fabrics.service.js';
 import {
   AdminMessagesQuery,
+  AttachDepositDto,
+  DismissDepositDto,
+  RefundDepositDto,
   ListAdminFabricsQuery,
   ListAdminOrdersQuery,
   ListAuditQuery,
@@ -60,6 +65,7 @@ export class AdminController {
     private readonly overviewService: AdminOverviewService,
     private readonly users: AdminUsersService,
     private readonly fabrics: AdminFabricsService,
+    private readonly stellar: StellarCheckoutService,
   ) {}
 
   @Get('overview')
@@ -201,6 +207,63 @@ export class AdminController {
       details: { orderId: tx.orderId, amount: tx.amount, status: tx.status },
     });
     return tx;
+  }
+
+  // ── Stellar ──
+
+  @Get('stellar/treasury')
+  stellarTreasury() {
+    return this.stellar.treasury();
+  }
+
+  @Get('stellar/unmatched')
+  listUnmatched(@Query('status', new DefaultValuePipe(UnmatchedStatus.OPEN)) status: string) {
+    if (status !== 'all' && !(Object.values(UnmatchedStatus) as string[]).includes(status)) {
+      throw new BadRequestException(`Unknown deposit status: ${status}`);
+    }
+    return this.stellar.listUnmatched(status as UnmatchedStatus | 'all');
+  }
+
+  @Post('stellar/unmatched/:id/attach')
+  @HttpCode(HttpStatus.OK)
+  async attachDeposit(@CurrentUser() admin: User, @Param('id', ParseUUIDPipe) id: string, @Body() dto: AttachDepositDto) {
+    const result = await this.stellar.attachUnmatched(admin, id, dto.orderReference);
+    await this.audit.record(admin, {
+      action: 'stellar.deposit.attach',
+      targetType: 'stellar_deposit',
+      targetId: id,
+      summary: `Attached ${result.deposit.amount} USDC to ${dto.orderReference.toUpperCase()} (${result.outcome})`,
+      details: { orderId: result.deposit.orderId, txHash: result.deposit.txHash, outcome: result.outcome },
+    });
+    return result;
+  }
+
+  @Post('stellar/unmatched/:id/refund')
+  @HttpCode(HttpStatus.OK)
+  async refundDeposit(@CurrentUser() admin: User, @Param('id', ParseUUIDPipe) id: string, @Body() dto: RefundDepositDto) {
+    const deposit = await this.stellar.refundUnmatched(admin, id, { address: dto.address, memo: dto.memo });
+    await this.audit.record(admin, {
+      action: 'stellar.deposit.refund',
+      targetType: 'stellar_deposit',
+      targetId: id,
+      summary: `Refunded ${deposit?.amount ?? '?'} USDC to ${dto.address} (${deposit?.status ?? 'unknown'})`,
+      details: { address: dto.address, memo: dto.memo ?? null, refundTxHash: deposit?.refundTxHash ?? null, status: deposit?.status },
+    });
+    return deposit;
+  }
+
+  @Post('stellar/unmatched/:id/dismiss')
+  @HttpCode(HttpStatus.OK)
+  async dismissDeposit(@CurrentUser() admin: User, @Param('id', ParseUUIDPipe) id: string, @Body() dto: DismissDepositDto) {
+    const deposit = await this.stellar.dismissUnmatched(admin, id, dto.note);
+    await this.audit.record(admin, {
+      action: 'stellar.deposit.dismiss',
+      targetType: 'stellar_deposit',
+      targetId: id,
+      summary: `Dismissed an unmatched Stellar deposit: ${dto.note}`,
+      details: { note: dto.note },
+    });
+    return deposit;
   }
 
   // ── Reviews ──

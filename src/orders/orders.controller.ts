@@ -1,5 +1,7 @@
 import { Body, Controller, Get, HttpCode, HttpStatus, Param, ParseUUIDPipe, Post, Query } from '@nestjs/common';
 import { OrdersService } from './orders.service.js';
+import { StellarCheckoutService } from './stellar-checkout.service.js';
+import { RateLimit } from '../common/rate-limit/rate-limit.js';
 import {
   ApproveDto,
   CreateOrderDto,
@@ -12,6 +14,7 @@ import {
   ReasonDto,
   ReviewDto,
   ReviewReplyDto,
+  PayDto,
   VerifyPaymentDto,
 } from './dto/order.dto.js';
 import { Roles } from '../common/decorators/roles.decorator.js';
@@ -22,7 +25,10 @@ import { Public } from '../common/decorators/public.decorator.js';
 
 @Controller('orders')
 export class OrdersController {
-  constructor(private readonly orders: OrdersService) {}
+  constructor(
+    private readonly orders: OrdersService,
+    private readonly stellarCheckout: StellarCheckoutService,
+  ) {}
 
   @Post()
   @Roles(UserRole.CUSTOMER)
@@ -132,8 +138,17 @@ export class OrdersController {
   @Post(':id/pay')
   @HttpCode(HttpStatus.OK)
   @Roles(UserRole.CUSTOMER, UserRole.TAILOR)
-  pay(@CurrentUser() user: User, @Param('id', ParseUUIDPipe) id: string) {
+  pay(@CurrentUser() user: User, @Param('id', ParseUUIDPipe) id: string, @Body() dto: PayDto = {}) {
+    if (dto?.method === 'stellar') return this.stellarCheckout.start(user, id, dto);
     return this.orders.pay(user, id);
+  }
+
+  /** The order's current USDC checkout and whether it has been paid (the pay screen polls this). */
+  @Get(':id/stellar-intent')
+  @Roles(UserRole.CUSTOMER, UserRole.TAILOR)
+  @RateLimit({ name: 'stellar-intent', limit: 240, windowSec: 60 * 60, by: ['user'] })
+  stellarIntent(@CurrentUser() user: User, @Param('id', ParseUUIDPipe) id: string) {
+    return this.stellarCheckout.current(user, id);
   }
 
   @Post(':id/verify-payment')
