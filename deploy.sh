@@ -70,6 +70,22 @@ PM2_BIN="$(command -v pm2)"
 
 echo "Fetching latest code..."
 git fetch origin "$DEPLOY_BRANCH"
+
+# Inspect what was fetched before checking any of it out. The guard used is the one in the
+# currently deployed commit (already trusted), never the incoming copy.
+echo "Checking incoming commits with git-guard..."
+guard_file="$(mktemp)"
+if git show "HEAD:scripts/git-guard.sh" >"$guard_file" 2>/dev/null; then
+  if ! bash "$guard_file" --base HEAD --target "origin/$DEPLOY_BRANCH"; then
+    rm -f "$guard_file"
+    echo "Deploy stopped: origin/$DEPLOY_BRANCH failed the malware check. The running app was not touched." >&2
+    exit 1
+  fi
+else
+  echo "git-guard is not in the deployed commit yet (first deploy with it); skipping the check this once."
+fi
+rm -f "$guard_file"
+
 git checkout -f -B "$DEPLOY_BRANCH" "origin/$DEPLOY_BRANCH"
 
 if [[ -n "$ENV_FILE" ]]; then

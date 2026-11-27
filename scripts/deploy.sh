@@ -121,6 +121,19 @@ for cmd in git pnpm ssh scp tar; do
   fi
 done
 
+# Before installing or building anything: check what this deploy will build and push
+# (commits, uncommitted and untracked files) against what is on GitHub. This catches a
+# tampered remote (history rewritten) and malware planted in the local checkout.
+echo "Checking for malware with git-guard..."
+if git fetch origin "$DEPLOY_BRANCH" 2>/dev/null && git rev-parse -q --verify "origin/$DEPLOY_BRANCH" >/dev/null; then
+  if ! bash scripts/git-guard.sh --base "origin/$DEPLOY_BRANCH" --target WORKTREE; then
+    echo "Deploy stopped by git-guard. Nothing was installed, built or pushed." >&2
+    exit 1
+  fi
+else
+  echo "origin/$DEPLOY_BRANCH not found; skipping the remote comparison."
+fi
+
 echo "Installing dependencies locally..."
 pnpm install --frozen-lockfile || pnpm install
 
