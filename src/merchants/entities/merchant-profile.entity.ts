@@ -1,5 +1,6 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, Index } from 'typeorm';
 import { KycStatus } from '../../types/index.js';
+import type { PayoutMethod } from '../../common/payout-account.js';
 
 export enum SourcingType {
   /** Buys directly from mills or weavers. */
@@ -69,6 +70,18 @@ export class MerchantProfile {
   /** Paystack transfer recipient for the account above; cleared whenever bank details change. */
   @Column({ type: 'varchar', nullable: true })
   paystackRecipientCode: string | null;
+
+  /** 'bank' (Paystack, default) or 'stellar' (USDC to stellarAddress). */
+  @Column({ type: 'varchar', length: 10, default: 'bank' })
+  payoutMethod: PayoutMethod;
+
+  /** Stellar account (G...) that receives USDC payouts. */
+  @Column({ type: 'varchar', length: 56, nullable: true })
+  stellarAddress: string | null;
+
+  /** Memo the receiving exchange or wallet requires, if any. */
+  @Column({ type: 'varchar', length: 28, nullable: true })
+  stellarMemo: string | null;
 
   // ── Review ──
   @Column({ type: 'enum', enum: KycStatus, default: KycStatus.DRAFT })

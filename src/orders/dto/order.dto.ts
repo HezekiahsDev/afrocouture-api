@@ -15,6 +15,7 @@ import {
   IsUrl,
   IsUUID,
   Length,
+  Matches,
   Max,
   MaxLength,
   Min,
@@ -95,6 +96,23 @@ export class QuoteDto {
 
 export class ReasonDto {
   @IsString() @Length(5, 1000, { message: 'Give a short reason (at least 5 characters).' }) reason: string;
+}
+
+/** POST /orders/:id/pay. Without a body it starts a Paystack checkout, as before. */
+export class PayDto {
+  @IsOptional() @IsIn(['paystack', 'stellar']) method?: 'paystack' | 'stellar';
+
+  /** Stellar: the wallet the customer connected (refunds go here unless refundAddress is set). */
+  @IsOptional()
+  @Matches(/^G[A-Z2-7]{55}$/, { message: 'Enter a valid Stellar address (starts with G, 56 characters).' })
+  payerAddress?: string;
+
+  /** Stellar: where to refund when paying from an exchange. */
+  @IsOptional()
+  @Matches(/^G[A-Z2-7]{55}$/, { message: 'Enter a valid Stellar refund address (starts with G, 56 characters).' })
+  refundAddress?: string;
+
+  @IsOptional() @IsString() @MaxLength(28, { message: 'A Stellar memo is at most 28 characters.' }) refundMemo?: string;
 }
 
 export class VerifyPaymentDto {
