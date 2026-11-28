@@ -78,14 +78,11 @@ export class EscrowTransaction {
   @Column({ type: 'numeric', precision: 20, scale: 7, nullable: true })
   fxRate: string | null;
 
-  /** Stellar: hash of the transaction (incoming for a HOLD, ours for payouts and refunds). */
+  /** Stellar: transaction hash (the incoming payment for a HOLD; the service's payout/refund otherwise). */
   @Index()
   @Column({ type: 'varchar', length: 64, nullable: true })
   txHash: string | null;
 
-  /** Stellar: our signed transaction can't land after this; until then a missing tx is still "pending". */
-  @Column({ type: 'timestamptz', nullable: true })
-  submittedUntil: Date | null;
 
   /**
    * Stellar: on a HOLD, where refunds go (the customer's refund address, else the payer);

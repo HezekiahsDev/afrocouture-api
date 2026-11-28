@@ -1,6 +1,9 @@
 import { BadRequestException, Logger } from '@nestjs/common';
 import { MailService } from '../mail/mail.service.js';
-import { isValidMemo, type StellarService } from '../payments/stellar/stellar.service.js';
+import type { StellarPaymentsClient } from '../payments/stellar/stellar-payments.client.js';
+
+/** A Stellar memo: a number (MEMO_ID) or at most 28 bytes of text. */
+const isValidMemo = (memo: string) => (/^\d{1,20}$/.test(memo) && BigInt(memo) <= 18_446_744_073_709_551_615n) || Buffer.byteLength(memo, 'utf8') <= 28;
 
 /** 'bank': naira to the bank account through Paystack. 'stellar': USDC to a Stellar address. */
 export type PayoutMethod = 'bank' | 'stellar';
@@ -59,7 +62,7 @@ export function resetRecipientIfChanged(profile: PayoutAccount, before: PayoutSn
  */
 export async function validateStellarPayout(
   profile: PayoutAccount,
-  stellar: StellarService | undefined,
+  stellar: StellarPaymentsClient | undefined,
   before?: PayoutSnapshot,
 ): Promise<void> {
   if (profile.stellarAddress !== undefined) profile.stellarAddress = profile.stellarAddress?.trim().toUpperCase() || null;
@@ -68,12 +71,17 @@ export async function validateStellarPayout(
   // Only check the network when the Stellar destination is new, so unrelated edits still save if Horizon is down.
   if (before?.payoutMethod === 'stellar' && before.stellarAddress === profile.stellarAddress) return;
 
-  if (!stellar?.payoutsEnabled) throw new BadRequestException('USDC payouts are not available yet. Choose bank payouts for now.');
+  if (!(await stellar?.payoutsEnabled())) throw new BadRequestException('USDC payouts are not available yet. Choose bank payouts for now.');
   if (!profile.stellarAddress) throw new BadRequestException('Add the Stellar address that should receive your USDC payouts.');
   if (profile.stellarMemo && !isValidMemo(profile.stellarMemo)) {
     throw new BadRequestException('That memo is too long: use a number or at most 28 bytes of text.');
   }
-  const check = await stellar.checkAddress(profile.stellarAddress);
+  let check;
+  try {
+    check = await stellar!.checkAddress(profile.stellarAddress);
+  } catch {
+    throw new BadRequestException('We could not check that address right now. Please try again.');
+  }
   if (!check.ok) throw new BadRequestException(check.message);
 }
 

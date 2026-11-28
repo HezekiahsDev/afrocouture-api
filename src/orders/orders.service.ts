@@ -33,7 +33,7 @@ import {
 import { sendOrderMail } from './orders-mail.js';
 import { EscrowService, type HoldDetails } from '../escrow/escrow.service.js';
 import { EscrowTransaction, EscrowTransactionStatus, PaymentProvider } from '../escrow/entities/escrow-transaction.entity.js';
-import { StellarService } from '../payments/stellar/stellar.service.js';
+import { StellarPaymentsClient } from '../payments/stellar/stellar-payments.client.js';
 import { PaystackError, PaystackService } from '../payments/paystack.service.js';
 import { MailService } from '../mail/mail.service.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
@@ -92,7 +92,7 @@ export class OrdersService implements OnModuleInit {
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly escrow: EscrowService,
     private readonly paystack: PaystackService,
-    private readonly stellar: StellarService,
+    private readonly stellar: StellarPaymentsClient,
     private readonly mail: MailService,
     private readonly notifications: NotificationsService,
     private readonly events: EventEmitter2,
@@ -998,7 +998,7 @@ export class OrdersService implements OnModuleInit {
               tx.provider === PaymentProvider.STELLAR ? Boolean(account.stellarAddress) : Boolean(account.bankCode && account.accountNumber),
           }
         : { name: customers.get(tx.partyId) ?? 'Customer', bankName: null, accountNumber: null, accountName: null, payoutMethod: null, stellarAddress: null, stellarMemo: null, payoutReady: true };
-      const explorerUrl = tx.txHash && !tx.txHash.startsWith('claim:') && tx.provider === PaymentProvider.STELLAR ? this.stellar.explorerUrl(tx.txHash) : null;
+      const explorerUrl = tx.txHash && tx.provider === PaymentProvider.STELLAR ? this.stellar.explorerUrl(tx.txHash) : null;
       return Object.assign({}, tx, { order: orders.find((o) => o.id === tx.orderId) ?? null, payee, explorerUrl });
     });
   }

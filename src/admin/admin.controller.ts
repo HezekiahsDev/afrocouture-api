@@ -27,7 +27,7 @@ import { EscrowService } from '../escrow/escrow.service.js';
 import { EscrowTransactionStatus } from '../escrow/entities/escrow-transaction.entity.js';
 import { ChatService } from '../chat/chat.service.js';
 import { StellarCheckoutService } from '../orders/stellar-checkout.service.js';
-import { UnmatchedStatus } from '../payments/stellar/entities/stellar-unmatched-deposit.entity.js';
+const DEPOSIT_STATUSES = ['open', 'attached', 'refunded', 'dismissed', 'refund_failed', 'all'];
 import { AuditService } from './audit/audit.service.js';
 import { AdminOverviewService } from './admin-overview.service.js';
 import { AdminUsersService } from './admin-users.service.js';
@@ -217,11 +217,9 @@ export class AdminController {
   }
 
   @Get('stellar/unmatched')
-  listUnmatched(@Query('status', new DefaultValuePipe(UnmatchedStatus.OPEN)) status: string) {
-    if (status !== 'all' && !(Object.values(UnmatchedStatus) as string[]).includes(status)) {
-      throw new BadRequestException(`Unknown deposit status: ${status}`);
-    }
-    return this.stellar.listUnmatched(status as UnmatchedStatus | 'all');
+  listUnmatched(@Query('status', new DefaultValuePipe('open')) status: string) {
+    if (!DEPOSIT_STATUSES.includes(status)) throw new BadRequestException(`Unknown deposit status: ${status}`);
+    return this.stellar.listUnmatched(status);
   }
 
   @Post('stellar/unmatched/:id/attach')
@@ -246,8 +244,8 @@ export class AdminController {
       action: 'stellar.deposit.refund',
       targetType: 'stellar_deposit',
       targetId: id,
-      summary: `Refunded ${deposit?.amount ?? '?'} USDC to ${dto.address} (${deposit?.status ?? 'unknown'})`,
-      details: { address: dto.address, memo: dto.memo ?? null, refundTxHash: deposit?.refundTxHash ?? null, status: deposit?.status },
+      summary: `Refunded ${deposit.amount} USDC to ${dto.address} (${deposit.status})`,
+      details: { address: dto.address, memo: dto.memo ?? null, refundTxHash: deposit.refundTxHash, status: deposit.status },
     });
     return deposit;
   }

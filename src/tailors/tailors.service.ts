@@ -18,7 +18,7 @@ import {
   resetRecipientIfChanged,
   validateStellarPayout,
 } from '../common/payout-account.js';
-import { StellarService } from '../payments/stellar/stellar.service.js';
+import { StellarPaymentsClient } from '../payments/stellar/stellar-payments.client.js';
 
 /** Fields an approved artisan may keep editing without going back through review. */
 const LIVE_EDITABLE: (keyof SaveTailorProfileDto)[] = [
@@ -122,7 +122,7 @@ export class TailorsService {
     private readonly userRepository: Repository<User>,
     private readonly mail: MailService,
     private readonly notifications: NotificationsService,
-    @Optional() private readonly stellar?: StellarService,
+    @Optional() private readonly stellar?: StellarPaymentsClient,
   ) {}
 
   // ── Public directory ──

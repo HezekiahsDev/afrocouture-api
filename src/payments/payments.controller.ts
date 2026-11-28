@@ -1,7 +1,6 @@
 import { BadGatewayException, BadRequestException, Controller, Get, Query } from '@nestjs/common';
 import { PaystackError, PaystackService } from './paystack.service.js';
-import { StellarService } from './stellar/stellar.service.js';
-import { FxRateService } from './stellar/fx-rate.service.js';
+import { StellarPaymentsClient, toHttpError } from './stellar/stellar-payments.client.js';
 import { Public } from '../common/decorators/public.decorator.js';
 import { Roles } from '../common/decorators/roles.decorator.js';
 import { RateLimit } from '../common/rate-limit/rate-limit.js';
@@ -11,20 +10,19 @@ import { UserRole } from '../types/index.js';
 export class PaymentsController {
   constructor(
     private readonly paystack: PaystackService,
-    private readonly stellar: StellarService,
-    private readonly fx: FxRateService,
+    private readonly stellar: StellarPaymentsClient,
   ) {}
 
   /** Which payment methods checkout and payout forms should offer. */
   @Public()
   @Get('methods')
-  methods() {
-    const stellarCheckout = this.stellar.checkoutEnabled && this.fx.isConfigured;
+  async methods() {
+    const config = await this.stellar.serviceConfig();
     return {
       paystack: this.paystack.isConfigured,
-      stellar: stellarCheckout,
-      stellarPayouts: this.stellar.payoutsEnabled && this.fx.isConfigured,
-      stellarNetwork: stellarCheckout || this.stellar.payoutsEnabled ? this.stellar.network : null,
+      stellar: Boolean(config?.checkoutEnabled),
+      stellarPayouts: Boolean(config?.payoutsEnabled),
+      stellarNetwork: config && (config.checkoutEnabled || config.payoutsEnabled) ? config.network : null,
     };
   }
 
@@ -34,7 +32,11 @@ export class PaymentsController {
   @RateLimit({ name: 'stellar-check-address', limit: 30, windowSec: 60 * 60, by: ['user'] })
   async checkStellarAddress(@Query('address') address = '') {
     if (!this.stellar.isConfigured) throw new BadRequestException('USDC payouts are not available yet.');
-    return this.stellar.checkAddress(address);
+    try {
+      return await this.stellar.checkAddress(address.trim());
+    } catch (err) {
+      toHttpError(err);
+    }
   }
 
   /** Nigerian banks with their Paystack codes, for payout account forms. */

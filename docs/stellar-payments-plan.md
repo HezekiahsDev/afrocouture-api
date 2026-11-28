@@ -10,7 +10,11 @@ no smart-contract escrow in this plan.
 Read with [orders-payments-ai-contract.md](orders-payments-ai-contract.md), which defines the money rules
 this plan keeps.
 
-## Status (2026-11-26)
+## Status (2026-11-28)
+
+**Update, Nov 28:** Stellar now lives in the separate **stellar-payment-service**. This API calls it over HTTP and receives signed webhooks (see the contract doc). A live testnet run passed end to end: a real payment paid an order, a real USDC payout went to a merchant, a double payment was refunded, and a memo-less deposit was flagged. The notes below describe the original in-process build.
+
+### Original status (2026-11-26)
 
 **Phases 1 and 2 are built, behind flags (off by default).** The API contract is in
 [orders-payments-ai-contract.md § Payments — Stellar USDC](orders-payments-ai-contract.md#payments--stellar-usdc).

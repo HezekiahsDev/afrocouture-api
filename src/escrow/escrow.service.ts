@@ -1,7 +1,7 @@
 import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
-import { DataSource, EntityManager, In, IsNull, Not, Repository } from 'typeorm';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { DataSource, EntityManager, In, LessThan, Repository } from 'typeorm';
+import { randomBytes } from 'node:crypto';
 import {
   EscrowTransaction,
   EscrowTransactionStatus as TxStatus,
@@ -12,9 +12,7 @@ import { Order } from '../orders/entities/order.entity.js';
 import { TailorProfile } from '../tailors/entities/tailor-profile.entity.js';
 import { MerchantProfile } from '../merchants/entities/merchant-profile.entity.js';
 import { PaystackError, PaystackService } from '../payments/paystack.service.js';
-import { StellarError, StellarService } from '../payments/stellar/stellar.service.js';
-import { FxRateService } from '../payments/stellar/fx-rate.service.js';
-import { fromStroops, nairaToUsdcStroops, shareOfStroops, toStroops } from '../payments/stellar/money.js';
+import { ServiceTransfer, StellarPaymentsClient, StellarServiceError } from '../payments/stellar/stellar-payments.client.js';
 import { AlertsService } from '../common/alerts/alerts.service.js';
 
 export interface EscrowSummary {
@@ -27,6 +25,8 @@ export interface EscrowSummary {
 /** Provider details stored on a HOLD. Paystack holds need none. */
 export interface HoldDetails {
   provider: PaymentProvider;
+  /** Stellar: the service's payment id (refunds are made against it). */
+  providerCode?: string | null;
   assetAmount?: string | null;
   fxRate?: string | null;
   txHash?: string | null;
@@ -38,13 +38,8 @@ export interface HoldDetails {
 /** Releases and refunds that count against the balance (a failed or reversed one gave the money back). */
 const COMMITTED = [TxStatus.PENDING, TxStatus.SUCCESS];
 const RELEASES = [TxType.RELEASE_TAILOR, TxType.RELEASE_MERCHANT];
-/** A Stellar row claimed for signing but never given a hash for this long was abandoned mid-way (nothing was sent). */
-const STALE_CLAIM_MS = 5 * 60 * 1000;
-/** A pending Stellar row that was never claimed for this long missed its execute() (e.g. a restart). */
-const UNSENT_AFTER_MS = 2 * 60 * 1000;
 
 const shortId = () => randomBytes(4).toString('hex').toUpperCase();
-const isClaim = (hash: string | null) => Boolean(hash?.startsWith('claim:'));
 
 /**
  * The ledger behind every order: one HOLD when the customer pays, then payouts to
@@ -60,8 +55,7 @@ export class EscrowService {
     @InjectRepository(EscrowTransaction) private readonly txRepository: Repository<EscrowTransaction>,
     private readonly paystack: PaystackService,
     @Optional() private readonly alerts?: AlertsService,
-    @Optional() private readonly stellar?: StellarService,
-    @Optional() private readonly fx?: FxRateService,
+    @Optional() private readonly stellar?: StellarPaymentsClient,
   ) {}
 
   // ── Reads ──
@@ -99,14 +93,6 @@ export class EscrowService {
     });
   }
 
-  /** USDC still owed on pending Stellar payouts and refunds (for the treasury view). */
-  async pendingStellarStroops(): Promise<bigint> {
-    const rows = await this.txRepository.find({
-      where: { provider: PaymentProvider.STELLAR, status: TxStatus.PENDING, type: Not(TxType.HOLD) },
-    });
-    return rows.reduce((sum, tx) => sum + (tx.assetAmount ? toStroops(tx.assetAmount) : 0n), 0n);
-  }
-
   // ── Holds ──
 
   /** Records the customer's verified payment. Must run inside the caller's locked transaction. */
@@ -126,7 +112,7 @@ export class EscrowService {
         assetAmount: details?.assetAmount ?? null,
         fxRate: details?.fxRate ?? null,
         txHash: details?.txHash ?? null,
-        providerCode: details?.txHash ?? null,
+        providerCode: details?.providerCode ?? details?.txHash ?? null,
         destination: details?.destination ?? null,
         destinationMemo: details?.destinationMemo ?? null,
       }),
@@ -244,13 +230,23 @@ export class EscrowService {
     const { balance } = await this.summary(tx.orderId);
     if (tx.amount > balance) throw new ConflictException('Not enough left in escrow for this payout.');
 
+    const wasStellar = tx.provider === PaymentProvider.STELLAR;
     // The payee may have switched between bank and Stellar since the failure.
     if (tx.type !== TxType.REFUND) {
       tx.provider = await this.payoutProvider(this.dataSource.manager, { type: tx.partyType as 'tailor' | 'merchant', id: tx.partyId });
     }
-    // A FAILED Stellar transaction provably never landed, so a new one can't double-pay.
+    // Stellar: the service retries the same transfer (same reference, so it can never double-pay).
+    if (wasStellar && tx.provider === PaymentProvider.STELLAR && tx.providerCode) {
+      tx.status = TxStatus.PENDING;
+      tx.failureReason = null;
+      await this.txRepository.save(tx);
+      try {
+        return await this.applyTransfer(tx, await this.stellar!.retryTransfer(tx.providerCode));
+      } catch (err) {
+        return this.stellarError(tx, err);
+      }
+    }
     tx.txHash = null;
-    tx.submittedUntil = null;
     tx.providerCode = null;
     tx.assetAmount = null;
     tx.fxRate = null;
@@ -263,154 +259,85 @@ export class EscrowService {
     return this.execute(tx);
   }
 
-  // ── Stellar ──
+  // ── Stellar (through stellar-payment-service) ──
 
   /**
-   * Pays a Stellar payout or refund at most once:
-   * 1. atomically claim the row (only one worker can sign it),
-   * 2. sign a payment that expires in 60 s and store its hash *before* submitting,
-   * 3. submit. A rejection marks it failed; a timeout leaves it pending for `reconcileStellar()`,
-   *    which looks the hash up and only fails it once it can no longer land.
+   * Asks the service to send a Stellar payout or refund. The escrow reference is the service's
+   * idempotency key, so calling this again (after a timeout, a restart, or from the reconciler)
+   * returns the same transfer instead of paying twice. Final status arrives by webhook.
    */
   private async executeStellar(tx: EscrowTransaction): Promise<EscrowTransaction> {
-    if (tx.txHash) return tx; // already signed: the reconciler owns it now
-    if (!this.stellar?.canSign) return this.fail(tx, 'Stellar signing is not configured (STELLAR_OPERATING_SECRET).');
-
-    let target: { to: string; memo: string | null; stroops: bigint; rate: string | null };
+    if (!this.stellar?.isConfigured) return this.fail(tx, 'Stellar payments are not configured (STELLAR_SERVICE_URL).');
     try {
-      target = await this.stellarTarget(tx);
-    } catch (err) {
-      return this.fail(tx, (err as Error).message);
-    }
-    if (target.stroops <= 0n) return this.fail(tx, 'The amount is too small to send on Stellar.');
-
-    const claim = `claim:${randomUUID()}`;
-    const claimed = await this.txRepository.update({ id: tx.id, txHash: IsNull(), status: TxStatus.PENDING }, { txHash: claim });
-    if (!claimed.affected) return (await this.txRepository.findOne({ where: { id: tx.id } })) ?? tx;
-    tx.txHash = claim;
-
-    return this.stellar.withSubmitLock(async () => {
-      let signed;
-      try {
-        signed = await this.stellar!.signPayment({ to: target.to, stroops: target.stroops, memo: target.memo });
-      } catch (err) {
-        tx.txHash = null;
-        const reason = err instanceof StellarError ? err.message : 'Could not build the Stellar payment';
-        if (!(err instanceof StellarError)) this.logger.error(`Escrow ${tx.reference} signing failed`, err as Error);
-        await this.txRepository.update({ id: tx.id, txHash: claim }, { txHash: null });
-        return this.fail(tx, reason);
+      if (tx.type === TxType.REFUND) {
+        const hold = await this.holdFor(tx);
+        if (!hold || hold.provider !== PaymentProvider.STELLAR || !hold.providerCode) return this.fail(tx, 'No Stellar payment to refund.');
+        return this.applyTransfer(
+          tx,
+          await this.stellar.createRefund({ clientReference: tx.reference, paymentId: hold.providerCode, share: { part: tx.amount, whole: hold.amount } }),
+        );
       }
-
-      // Record what we are about to send. If someone released our claim meanwhile, don't send.
-      const recorded = await this.txRepository.update(
-        { id: tx.id, txHash: claim },
-        {
-          txHash: signed.hash,
-          providerCode: signed.hash,
-          submittedUntil: signed.maxTime,
-          destination: target.to,
-          destinationMemo: target.memo,
-          assetAmount: fromStroops(target.stroops),
-          fxRate: target.rate,
-          failureReason: null,
-        },
+      const profile = await this.payeeProfile(tx);
+      if (!profile?.stellarAddress) return this.fail(tx, 'The payee has no Stellar address. Ask them to add one or switch to bank payouts.');
+      return this.applyTransfer(
+        tx,
+        await this.stellar.createPayout({
+          clientReference: tx.reference,
+          destination: profile.stellarAddress,
+          nairaAmount: tx.amount,
+          memo: profile.stellarMemo || tx.reference,
+        }),
       );
-      if (!recorded.affected) return (await this.txRepository.findOne({ where: { id: tx.id } })) ?? tx;
-      Object.assign(tx, {
-        txHash: signed.hash,
-        providerCode: signed.hash,
-        submittedUntil: signed.maxTime,
-        destination: target.to,
-        destinationMemo: target.memo,
-        assetAmount: fromStroops(target.stroops),
-        fxRate: target.rate,
-        failureReason: null,
-      });
-
-      const result = await this.stellar!.submit(signed.xdr);
-      if (result.status === 'success') {
-        tx.status = TxStatus.SUCCESS;
-        return this.txRepository.save(tx);
-      }
-      if (result.status === 'failed') return this.fail(tx, result.reason);
-      this.logger.warn(`Stellar ${tx.reference} (${signed.hash}) unconfirmed: ${result.reason}. The reconciler will settle it.`);
-      return tx;
-    });
+    } catch (err) {
+      return this.stellarError(tx, err);
+    }
   }
 
-  /** Where a Stellar payout or refund goes, and how much USDC. Throws with a reason for the admin. */
-  private async stellarTarget(tx: EscrowTransaction) {
-    if (tx.type === TxType.REFUND) {
-      const hold = await this.holdFor(tx);
-      if (!hold || hold.provider !== PaymentProvider.STELLAR || !hold.assetAmount) throw new Error('No Stellar payment to refund.');
-      if (!hold.destination) throw new Error('The payment has no refund address. Refund it by hand and mark it done.');
-      return {
-        to: hold.destination,
-        memo: hold.destinationMemo,
-        // The customer gets back the same share of the USDC they paid, so refunds carry no FX risk for them.
-        stroops: shareOfStroops(toStroops(hold.assetAmount), tx.amount, hold.amount),
-        rate: hold.fxRate,
-      };
-    }
-    if (!this.stellar?.payoutsEnabled) throw new Error('Stellar payouts are turned off (STELLAR_PAYOUTS_ENABLED).');
-    const profile = await this.payeeProfile(tx);
-    if (!profile?.stellarAddress) throw new Error('The payee has no Stellar address. Ask them to add one or switch to bank payouts.');
-    if (!this.fx) throw new Error('No exchange rate source is configured.');
-    let rate: string;
-    try {
-      rate = await this.fx.ngnPerUsdc();
-    } catch {
-      throw new Error('Exchange rate unavailable. Retry shortly.');
-    }
-    return {
-      to: profile.stellarAddress,
-      memo: profile.stellarMemo || tx.reference,
-      stroops: nairaToUsdcStroops(tx.amount, rate, 'down'),
-      rate,
-    };
+  /** Copies the service's view of a transfer onto the escrow row. */
+  private async applyTransfer(tx: EscrowTransaction, t: ServiceTransfer): Promise<EscrowTransaction> {
+    tx.providerCode = t.id;
+    tx.txHash = t.txHash;
+    tx.assetAmount = t.amount;
+    tx.fxRate = t.fxRate;
+    tx.destination = t.destination;
+    tx.destinationMemo = t.memo;
+    if (t.status === 'failed') return this.fail(tx, t.failureReason ?? 'The Stellar transfer failed.');
+    tx.status = t.status === 'success' ? TxStatus.SUCCESS : TxStatus.PENDING;
+    tx.failureReason = null;
+    return this.txRepository.save(tx);
+  }
+
+  /** A refusal (bad address, refund cap…) fails the row; an unreachable service leaves it pending for the reconciler. */
+  private async stellarError(tx: EscrowTransaction, err: unknown): Promise<EscrowTransaction> {
+    if (err instanceof StellarServiceError && err.isRejection) return this.fail(tx, err.message);
+    this.logger.warn(`Stellar ${tx.reference}: ${(err as Error).message}. The reconciler will try again.`);
+    tx.failureReason = 'Waiting for stellar-payment-service';
+    return this.txRepository.save(tx);
+  }
+
+  /** `transfer.succeeded` / `transfer.failed` from the service. Ignores rows that are already final. */
+  async onStellarTransferEvent(t: ServiceTransfer): Promise<void> {
+    const tx = await this.txRepository.findOne({ where: { reference: t.clientReference, provider: PaymentProvider.STELLAR } });
+    if (!tx || tx.status === TxStatus.SUCCESS) return;
+    if (tx.status === TxStatus.FAILED && t.status === 'failed') return;
+    await this.applyTransfer(tx, t);
   }
 
   /**
-   * Settles Stellar payouts and refunds left pending: confirms submitted ones by hash,
-   * fails them once they can no longer land, and sends ones a restart left unsent.
+   * Stellar rows still pending after a few minutes: ask the service again. Creation is
+   * idempotent on the reference, so this either returns the existing transfer's state or
+   * creates it if the first request never arrived.
    */
   async reconcileStellar(now = new Date()): Promise<void> {
     if (!this.stellar?.isConfigured) return;
-    const pending = await this.txRepository.find({
-      where: { provider: PaymentProvider.STELLAR, status: TxStatus.PENDING, type: Not(TxType.HOLD) },
+    const stale = await this.txRepository.find({
+      where: { provider: PaymentProvider.STELLAR, status: TxStatus.PENDING, updatedAt: LessThan(new Date(now.getTime() - 2 * 60 * 1000)) },
       order: { createdAt: 'ASC' },
       take: 100,
     });
-    let ledgerTime: Date | null = null;
-    for (const tx of pending) {
-      try {
-        if (!tx.txHash) {
-          if (now.getTime() - tx.createdAt.getTime() > UNSENT_AFTER_MS) await this.execute(tx);
-          continue;
-        }
-        if (isClaim(tx.txHash)) {
-          // Claimed but never signed (the worker died before recording a hash): nothing was sent.
-          if (now.getTime() - tx.updatedAt.getTime() > STALE_CLAIM_MS) {
-            await this.txRepository.update({ id: tx.id, txHash: tx.txHash }, { txHash: null });
-          }
-          continue;
-        }
-        const status = await this.stellar.transactionStatus(tx.txHash);
-        if (status === 'success') {
-          tx.status = TxStatus.SUCCESS;
-          tx.failureReason = null;
-          await this.txRepository.save(tx);
-        } else if (status === 'failed') {
-          await this.fail(tx, 'The transaction failed on the Stellar network.');
-        } else if (tx.submittedUntil) {
-          ledgerTime ??= await this.stellar.latestLedgerCloseTime();
-          if (ledgerTime > tx.submittedUntil) {
-            await this.fail(tx, 'Not confirmed on Stellar before it expired, so it was never sent. Safe to retry.');
-          }
-        }
-      } catch (err) {
-        this.logger.warn(`Stellar reconcile of ${tx.reference} failed: ${(err as Error).message}`);
-      }
+    for (const tx of stale) {
+      if (tx.type === TxType.HOLD) continue;
+      await this.executeStellar(tx);
     }
   }
 
@@ -476,7 +403,7 @@ export class EscrowService {
         `Provider: ${tx.provider ?? PaymentProvider.PAYSTACK}`,
         `Order: ${tx.orderId}`,
         `Transaction: ${tx.id}`,
-        tx.txHash && !isClaim(tx.txHash) ? `Stellar tx: ${tx.txHash}` : null,
+        tx.txHash ? `Stellar tx: ${tx.txHash}` : null,
         'Retry it from the admin console once the cause is fixed.',
       ]
         .filter(Boolean)
@@ -494,7 +421,7 @@ export class EscrowService {
 
   /** Stellar when the payee chose it and Stellar payouts are on; otherwise the bank through Paystack. */
   private async payoutProvider(em: EntityManager, party: { type: 'tailor' | 'merchant'; id: string }): Promise<PaymentProvider> {
-    if (!this.stellar?.payoutsEnabled) return PaymentProvider.PAYSTACK;
+    if (!(await this.stellar?.payoutsEnabled())) return PaymentProvider.PAYSTACK;
     const entity = party.type === 'tailor' ? TailorProfile : MerchantProfile;
     const profile = (await em.findOne(entity, { where: { id: party.id } })) as TailorProfile | MerchantProfile | null;
     return profile?.payoutMethod === 'stellar' && profile.stellarAddress ? PaymentProvider.STELLAR : PaymentProvider.PAYSTACK;
