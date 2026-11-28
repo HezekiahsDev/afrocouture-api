@@ -151,7 +151,7 @@ while IFS=$'\t' read -r status path; do
     fi
     while IFS= read -r line; do
       block "$path: script now runs a file first: ${line#+}"
-    done < <(grep -aE '^\+[[:space:]]*"[^"]+"[[:space:]]*:[[:space:]]*"[^"]*node [^"&]+&&' <<<"$lines" | grep -avE 'node (dist|build|\.next)/' | head -5)
+    done < <(grep -aoE '"[^"]+"[[:space:]]*:[[:space:]]*"[^"]*node [^"&]+&&[^"]*"' <<<"$(grep -a '^+' <<<"$lines")" | grep -avE 'node (dist|build|\.next)/' | head -5)
     while IFS= read -r line; do
       warn "$path: dependency added or changed: $(sed -E 's/^\+[[:space:]]*//; s/,$//' <<<"$line")"
     done < <(grep -aE '^\+[[:space:]]*"(@[a-z0-9._-]+/)?[a-z0-9._-]+"[[:space:]]*:[[:space:]]*"(npm:|github:|git\+|https?:|file:|[~^]?[0-9])' <<<"$lines" | grep -avE '"(version|packageManager)"[[:space:]]*:' | head -15)
