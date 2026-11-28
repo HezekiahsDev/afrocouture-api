@@ -11,6 +11,12 @@ export enum EscrowTransactionType {
   REFUND = 'refund',
 }
 
+/** How the money moves: Paystack (naira, card/bank) or USDC on Stellar. */
+export enum PaymentProvider {
+  PAYSTACK = 'paystack',
+  STELLAR = 'stellar',
+}
+
 export enum EscrowTransactionStatus {
   PENDING = 'pending',
   SUCCESS = 'success',
@@ -18,7 +24,7 @@ export enum EscrowTransactionStatus {
   REVERSED = 'reversed',
 }
 
-/** Ledger of every naira movement for an order. The order's escrow balance is HOLD minus releases and refunds. */
+/** Ledger of every naira movement (whatever the provider) for an order. The order's escrow balance is HOLD minus releases and refunds. */
 @Entity('escrow_transactions')
 @Index(['orderId'])
 @Index(['status', 'type'])
@@ -47,17 +53,50 @@ export class EscrowTransaction {
   @Column({ type: 'uuid' })
   partyId: string;
 
-  /** Our unique reference sent to Paystack (transaction, transfer or refund). */
+  /** Our unique reference (Paystack transaction/transfer reference, or a Stellar intent/payout reference). */
   @Index({ unique: true })
   @Column({ type: 'varchar' })
   reference: string;
 
-  /** Paystack's transfer_code / refund id, once known. */
+  /** Paystack's transfer_code / refund id, or the Stellar transaction hash, once known. */
   @Column({ type: 'varchar', nullable: true })
   providerCode: string | null;
 
   @Column({ type: 'text', nullable: true })
   failureReason: string | null;
+
+  // ── Provider details. `amount` stays whole naira for every provider. ──
+
+  @Column({ type: 'varchar', length: 16, default: PaymentProvider.PAYSTACK })
+  provider: PaymentProvider;
+
+  /** Stellar: USDC that moved (or will move), 7 decimals, as a string. */
+  @Column({ type: 'numeric', precision: 20, scale: 7, nullable: true })
+  assetAmount: string | null;
+
+  /** Stellar: naira per USDC used for this row. */
+  @Column({ type: 'numeric', precision: 20, scale: 7, nullable: true })
+  fxRate: string | null;
+
+  /** Stellar: transaction hash (the incoming payment for a HOLD; the service's payout/refund otherwise). */
+  @Index()
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  txHash: string | null;
+
+
+  /**
+   * Stellar: on a HOLD, where refunds go (the customer's refund address, else the payer);
+   * on a payout or refund, the address it was sent to.
+   */
+  @Column({ type: 'varchar', length: 69, nullable: true })
+  destination: string | null;
+
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  destinationMemo: string | null;
+
+  /** Refunds: the HOLD being refunded. Null on older rows (the order's first successful hold). */
+  @Column({ type: 'varchar', nullable: true })
+  holdReference: string | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;

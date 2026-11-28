@@ -31,8 +31,9 @@ import {
   ReviewReplyDto,
 } from './dto/order.dto.js';
 import { sendOrderMail } from './orders-mail.js';
-import { EscrowService } from '../escrow/escrow.service.js';
-import { EscrowTransaction, EscrowTransactionStatus } from '../escrow/entities/escrow-transaction.entity.js';
+import { EscrowService, type HoldDetails } from '../escrow/escrow.service.js';
+import { EscrowTransaction, EscrowTransactionStatus, PaymentProvider } from '../escrow/entities/escrow-transaction.entity.js';
+import { StellarPaymentsClient } from '../payments/stellar/stellar-payments.client.js';
 import { PaystackError, PaystackService } from '../payments/paystack.service.js';
 import { MailService } from '../mail/mail.service.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
@@ -91,6 +92,7 @@ export class OrdersService implements OnModuleInit {
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly escrow: EscrowService,
     private readonly paystack: PaystackService,
+    private readonly stellar: StellarPaymentsClient,
     private readonly mail: MailService,
     private readonly notifications: NotificationsService,
     private readonly events: EventEmitter2,
@@ -503,46 +505,92 @@ export class OrdersService implements OnModuleInit {
     }
     const paidNaira = Math.floor(tx.amount / 100);
 
-    const refunds: EscrowTransaction[] = [];
-    let mismatch = false;
-    const { order, events } = await this.transaction(async (em, events) => {
-      const order = await this.lockOrder(em, found.id);
-      if (await em.exists(EscrowTransaction, { where: { reference } })) return order; // already handled
+    const { outcome } = await this.applyPayment({
+      orderId: found.id,
+      holdReference: reference,
+      paidNaira,
+      covers: (order) => tx.amount === order.totalAmount * 100,
+      method: 'paystack',
+      actorUserId,
+    });
+    if (outcome === 'refunded') {
+      throw new ConflictException('That payment didn’t match the current quote, so it is being refunded. Please pay again.');
+    }
+  }
 
-      if (order.status === OrderStatus.QUOTED && tx.amount === order.totalAmount * 100) {
-        await this.escrow.recordHold(em, order, reference, order.totalAmount);
+  /**
+   * Moves a verified payment (Paystack or Stellar) into escrow. Runs under the order lock and is
+   * idempotent on `holdReference`. A payment that covers the current quote marks the order paid;
+   * anything else (outdated quote, short, order cancelled or already paid) is held and refunded.
+   */
+  async applyPayment(input: {
+    orderId: string;
+    holdReference: string;
+    /** Naira value of what arrived, used when it doesn't pay the order. */
+    paidNaira: number;
+    /** Evaluated under the lock against the current order. */
+    covers: (order: Order) => boolean;
+    /** Naira to hold when it covers; above totalAmount, the extra is refunded. Defaults to totalAmount. */
+    coveredHoldNaira?: (order: Order) => number;
+    hold?: HoldDetails;
+    method: 'paystack' | 'stellar';
+    actorUserId: string | null;
+  }): Promise<{ order: Order; outcome: 'paid' | 'refunded' | 'duplicate' }> {
+    const refunds: EscrowTransaction[] = [];
+    let outcome = 'duplicate' as 'paid' | 'refunded' | 'duplicate';
+    const via = input.method === 'stellar' ? ' in USDC' : '';
+    const { order, events } = await this.transaction(async (em, events) => {
+      const order = await this.lockOrder(em, input.orderId);
+      if (await em.exists(EscrowTransaction, { where: { reference: input.holdReference } })) return order; // already handled
+
+      if (order.status === OrderStatus.QUOTED && input.covers(order)) {
+        const held = Math.max(order.totalAmount, input.coveredHoldNaira?.(order) ?? order.totalAmount);
+        await this.escrow.recordHold(em, order, input.holdReference, held, input.hold);
+        if (held > order.totalAmount) {
+          const extra = await this.escrow.reserveRefund(em, order, held - order.totalAmount, input.holdReference);
+          if (extra) refunds.push(extra);
+        }
         order.status = OrderStatus.PAID;
         order.paidAt = new Date();
-        order.paystackReference = reference;
+        if (input.method === 'paystack') order.paystackReference = input.holdReference;
         order.milestone = OrderMilestone.PLACED;
         await em.save(order);
-        await this.record(em, events, order, 'paid', `Payment of ${naira(order.totalAmount)} received and held in escrow`, actorUserId);
+        await this.record(em, events, order, 'paid', `Payment of ${naira(order.totalAmount)} received${via} and held in escrow`, input.actorUserId, {
+          method: input.method,
+          ...(held > order.totalAmount ? { overpaidRefund: held - order.totalAmount } : {}),
+        });
         if (order.type === OrderType.FABRIC) await this.removeFromSaved(em, order);
+        outcome = 'paid';
         return order;
       }
 
       // Paid for an outdated quote, or after the order was cancelled/declined/already paid: give it back.
-      mismatch = true;
-      await this.escrow.recordHold(em, order, reference, paidNaira);
-      const refund = await this.escrow.reserveRefund(em, order, paidNaira);
+      outcome = 'refunded';
+      await this.escrow.recordHold(em, order, input.holdReference, input.paidNaira, input.hold);
+      const refund = await this.escrow.reserveRefund(em, order, input.paidNaira, input.holdReference);
       if (refund) refunds.push(refund);
-      await this.record(em, events, order, 'payment_refunded', `A payment of ${naira(paidNaira)} didn't match this order and is being refunded`, actorUserId);
+      await this.record(em, events, order, 'payment_refunded', `A payment of ${naira(input.paidNaira)}${via} didn't match this order and is being refunded`, input.actorUserId, {
+        method: input.method,
+      });
       return order;
     });
     for (const refund of refunds) await this.escrow.execute(refund);
     this.flush(events);
 
-    if (mismatch) {
+    if (outcome === 'refunded') {
       void this.notifications.notify(order.customerId, {
         type: 'payment_refunded',
         title: `Your payment for ${order.reference} is being refunded`,
-        body: `It didn't match the current quote. Paystack returns it to your card or account, usually within a few days.`,
+        body:
+          input.method === 'stellar'
+            ? `It didn't match the current quote, so we're sending the USDC back to the address it came from (or the refund address you gave).`
+            : `It didn't match the current quote. Paystack returns it to your card or account, usually within a few days.`,
         link: `/orders/${order.id}`,
         orderId: order.id,
       });
-      throw new ConflictException('That payment didn’t match the current quote, so it is being refunded. Please pay again.');
     }
-    if (events.some((e) => e.type === 'paid')) void this.notifyPaid(order);
+    if (outcome === 'paid') void this.notifyPaid(order);
+    return { order, outcome };
   }
 
   // ───────────────────────── Production ─────────────────────────
@@ -926,22 +974,32 @@ export class OrdersService implements OnModuleInit {
       .find({ where: { id: In([...new Set(txs.map((t) => t.orderId))]) }, select: { id: true, reference: true, status: true } });
     const tailors = await this.dataSource.getRepository(TailorProfile).find({
       where: { id: In(txs.filter((t) => t.partyType === 'tailor').map((t) => t.partyId)) },
-      select: { id: true, displayName: true, atelierName: true, bankName: true, bankCode: true, accountNumber: true, accountName: true },
+      select: { id: true, displayName: true, atelierName: true, bankName: true, bankCode: true, accountNumber: true, accountName: true, payoutMethod: true, stellarAddress: true, stellarMemo: true },
     });
     const merchants = await this.dataSource.getRepository(MerchantProfile).find({
       where: { id: In(txs.filter((t) => t.partyType === 'merchant').map((t) => t.partyId)) },
-      select: { id: true, businessName: true, bankName: true, bankCode: true, accountNumber: true, accountName: true },
+      select: { id: true, businessName: true, bankName: true, bankCode: true, accountNumber: true, accountName: true, payoutMethod: true, stellarAddress: true, stellarMemo: true },
     });
     const customers = await this.userNames(txs.filter((t) => t.partyType === 'customer').map((t) => t.partyId));
     return txs.map((tx) => {
       const tailor = tailors.find((t) => t.id === tx.partyId);
       const merchant = merchants.find((m) => m.id === tx.partyId);
-      const payee = tailor
-        ? { name: tailor.atelierName ?? tailor.displayName, bankName: tailor.bankName, accountNumber: tailor.accountNumber, accountName: tailor.accountName, payoutReady: Boolean(tailor.bankCode && tailor.accountNumber) }
-        : merchant
-          ? { name: merchant.businessName, bankName: merchant.bankName, accountNumber: merchant.accountNumber, accountName: merchant.accountName, payoutReady: Boolean(merchant.bankCode && merchant.accountNumber) }
-          : { name: customers.get(tx.partyId) ?? 'Customer', bankName: null, accountNumber: null, accountName: null, payoutReady: true };
-      return Object.assign({}, tx, { order: orders.find((o) => o.id === tx.orderId) ?? null, payee });
+      const account = tailor ?? merchant;
+      const payee = account
+        ? {
+            name: tailor ? (tailor.atelierName ?? tailor.displayName) : merchant!.businessName,
+            bankName: account.bankName,
+            accountNumber: account.accountNumber,
+            accountName: account.accountName,
+            payoutMethod: account.payoutMethod,
+            stellarAddress: account.stellarAddress,
+            stellarMemo: account.stellarMemo,
+            payoutReady:
+              tx.provider === PaymentProvider.STELLAR ? Boolean(account.stellarAddress) : Boolean(account.bankCode && account.accountNumber),
+          }
+        : { name: customers.get(tx.partyId) ?? 'Customer', bankName: null, accountNumber: null, accountName: null, payoutMethod: null, stellarAddress: null, stellarMemo: null, payoutReady: true };
+      const explorerUrl = tx.txHash && tx.provider === PaymentProvider.STELLAR ? this.stellar.explorerUrl(tx.txHash) : null;
+      return Object.assign({}, tx, { order: orders.find((o) => o.id === tx.orderId) ?? null, payee, explorerUrl });
     });
   }
 

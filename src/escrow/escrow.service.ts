@@ -1,16 +1,18 @@
 import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
-import { DataSource, EntityManager, In, Repository } from 'typeorm';
+import { DataSource, EntityManager, In, LessThan, Repository } from 'typeorm';
 import { randomBytes } from 'node:crypto';
 import {
   EscrowTransaction,
   EscrowTransactionStatus as TxStatus,
   EscrowTransactionType as TxType,
+  PaymentProvider,
 } from './entities/escrow-transaction.entity.js';
 import { Order } from '../orders/entities/order.entity.js';
 import { TailorProfile } from '../tailors/entities/tailor-profile.entity.js';
 import { MerchantProfile } from '../merchants/entities/merchant-profile.entity.js';
 import { PaystackError, PaystackService } from '../payments/paystack.service.js';
+import { ServiceTransfer, StellarPaymentsClient, StellarServiceError } from '../payments/stellar/stellar-payments.client.js';
 import { AlertsService } from '../common/alerts/alerts.service.js';
 
 export interface EscrowSummary {
@@ -18,6 +20,19 @@ export interface EscrowSummary {
   released: number;
   refunded: number;
   balance: number;
+}
+
+/** Provider details stored on a HOLD. Paystack holds need none. */
+export interface HoldDetails {
+  provider: PaymentProvider;
+  /** Stellar: the service's payment id (refunds are made against it). */
+  providerCode?: string | null;
+  assetAmount?: string | null;
+  fxRate?: string | null;
+  txHash?: string | null;
+  /** Where refunds of this payment go. */
+  destination?: string | null;
+  destinationMemo?: string | null;
 }
 
 /** Releases and refunds that count against the balance (a failed or reversed one gave the money back). */
@@ -29,6 +44,7 @@ const shortId = () => randomBytes(4).toString('hex').toUpperCase();
 /**
  * The ledger behind every order: one HOLD when the customer pays, then payouts to
  * the tailor and merchants and any refunds. Money only moves through this service.
+ * `amount` is whole naira for every provider; Paystack or Stellar only move it.
  */
 @Injectable()
 export class EscrowService {
@@ -39,6 +55,7 @@ export class EscrowService {
     @InjectRepository(EscrowTransaction) private readonly txRepository: Repository<EscrowTransaction>,
     private readonly paystack: PaystackService,
     @Optional() private readonly alerts?: AlertsService,
+    @Optional() private readonly stellar?: StellarPaymentsClient,
   ) {}
 
   // ── Reads ──
@@ -79,7 +96,7 @@ export class EscrowService {
   // ── Holds ──
 
   /** Records the customer's verified payment. Must run inside the caller's locked transaction. */
-  async recordHold(em: EntityManager, order: Order, reference: string, amount: number): Promise<void> {
+  async recordHold(em: EntityManager, order: Order, reference: string, amount: number, details?: HoldDetails): Promise<void> {
     const existing = await em.findOne(EscrowTransaction, { where: { reference } });
     if (existing) return;
     await em.save(
@@ -91,6 +108,13 @@ export class EscrowService {
         partyType: 'customer',
         partyId: order.customerId,
         reference,
+        provider: details?.provider ?? PaymentProvider.PAYSTACK,
+        assetAmount: details?.assetAmount ?? null,
+        fxRate: details?.fxRate ?? null,
+        txHash: details?.txHash ?? null,
+        providerCode: details?.providerCode ?? details?.txHash ?? null,
+        destination: details?.destination ?? null,
+        destinationMemo: details?.destinationMemo ?? null,
       }),
     );
   }
@@ -124,15 +148,22 @@ export class EscrowService {
         partyType: party.type,
         partyId: party.id,
         reference: `${order.reference}-P-${shortId()}`,
+        provider: await this.payoutProvider(em, party),
       }),
     );
   }
 
-  /** Commits a refund inside the caller's locked transaction; call `execute()` after commit. */
-  async reserveRefund(em: EntityManager, order: Order, amount: number): Promise<EscrowTransaction | null> {
+  /**
+   * Commits a refund inside the caller's locked transaction; call `execute()` after commit.
+   * `holdReference` picks the payment to refund (default: the order's first successful one).
+   */
+  async reserveRefund(em: EntityManager, order: Order, amount: number, holdReference?: string): Promise<EscrowTransaction | null> {
     const { balance } = await this.summary(order.id, em);
     const refundable = Math.min(amount, balance);
     if (refundable <= 0) return null;
+    const hold = holdReference
+      ? await em.findOne(EscrowTransaction, { where: { reference: holdReference, type: TxType.HOLD } })
+      : await em.findOne(EscrowTransaction, { where: { orderId: order.id, type: TxType.HOLD, status: TxStatus.SUCCESS } });
     return em.save(
       em.create(EscrowTransaction, {
         orderId: order.id,
@@ -142,20 +173,21 @@ export class EscrowService {
         partyType: 'customer',
         partyId: order.customerId,
         reference: `${order.reference}-R-${shortId()}`,
+        provider: hold?.provider ?? PaymentProvider.PAYSTACK,
+        holdReference: hold?.reference ?? null,
       }),
     );
   }
 
   /**
-   * Sends a reserved payout or refund to Paystack. Never throws: failures are stored
-   * on the transaction for an admin to retry.
+   * Sends a reserved payout or refund through its provider. Never throws: failures are
+   * stored on the transaction for an admin to retry.
    */
   async execute(tx: EscrowTransaction): Promise<EscrowTransaction> {
+    if (tx.provider === PaymentProvider.STELLAR) return this.executeStellar(tx);
     try {
       if (tx.type === TxType.REFUND) {
-        const hold = await this.txRepository.findOne({
-          where: { orderId: tx.orderId, type: TxType.HOLD, status: TxStatus.SUCCESS },
-        });
+        const hold = await this.holdFor(tx);
         if (!hold) return this.fail(tx, 'No successful payment to refund');
         const refund = await this.paystack.refund({ transactionReference: hold.reference, amountKobo: tx.amount * 100 });
         tx.providerCode = refund.id;
@@ -198,11 +230,115 @@ export class EscrowService {
     const { balance } = await this.summary(tx.orderId);
     if (tx.amount > balance) throw new ConflictException('Not enough left in escrow for this payout.');
 
+    const wasStellar = tx.provider === PaymentProvider.STELLAR;
+    // The payee may have switched between bank and Stellar since the failure.
+    if (tx.type !== TxType.REFUND) {
+      tx.provider = await this.payoutProvider(this.dataSource.manager, { type: tx.partyType as 'tailor' | 'merchant', id: tx.partyId });
+    }
+    // Stellar: the service retries the same transfer (same reference, so it can never double-pay).
+    if (wasStellar && tx.provider === PaymentProvider.STELLAR && tx.providerCode) {
+      tx.status = TxStatus.PENDING;
+      tx.failureReason = null;
+      await this.txRepository.save(tx);
+      try {
+        return await this.applyTransfer(tx, await this.stellar!.retryTransfer(tx.providerCode));
+      } catch (err) {
+        return this.stellarError(tx, err);
+      }
+    }
+    tx.txHash = null;
+    tx.providerCode = null;
+    tx.assetAmount = null;
+    tx.fxRate = null;
+    tx.destination = null;
+    tx.destinationMemo = null;
     tx.status = TxStatus.PENDING;
     tx.failureReason = null;
     tx.reference = `${tx.reference.replace(/-[0-9A-F]{8}$/, '')}-${shortId()}`;
     await this.txRepository.save(tx);
     return this.execute(tx);
+  }
+
+  // ── Stellar (through stellar-payment-service) ──
+
+  /**
+   * Asks the service to send a Stellar payout or refund. The escrow reference is the service's
+   * idempotency key, so calling this again (after a timeout, a restart, or from the reconciler)
+   * returns the same transfer instead of paying twice. Final status arrives by webhook.
+   */
+  private async executeStellar(tx: EscrowTransaction): Promise<EscrowTransaction> {
+    if (!this.stellar?.isConfigured) return this.fail(tx, 'Stellar payments are not configured (STELLAR_SERVICE_URL).');
+    try {
+      if (tx.type === TxType.REFUND) {
+        const hold = await this.holdFor(tx);
+        if (!hold || hold.provider !== PaymentProvider.STELLAR || !hold.providerCode) return this.fail(tx, 'No Stellar payment to refund.');
+        return this.applyTransfer(
+          tx,
+          await this.stellar.createRefund({ clientReference: tx.reference, paymentId: hold.providerCode, share: { part: tx.amount, whole: hold.amount } }),
+        );
+      }
+      const profile = await this.payeeProfile(tx);
+      if (!profile?.stellarAddress) return this.fail(tx, 'The payee has no Stellar address. Ask them to add one or switch to bank payouts.');
+      return this.applyTransfer(
+        tx,
+        await this.stellar.createPayout({
+          clientReference: tx.reference,
+          destination: profile.stellarAddress,
+          nairaAmount: tx.amount,
+          memo: profile.stellarMemo || tx.reference,
+        }),
+      );
+    } catch (err) {
+      return this.stellarError(tx, err);
+    }
+  }
+
+  /** Copies the service's view of a transfer onto the escrow row. */
+  private async applyTransfer(tx: EscrowTransaction, t: ServiceTransfer): Promise<EscrowTransaction> {
+    tx.providerCode = t.id;
+    tx.txHash = t.txHash;
+    tx.assetAmount = t.amount;
+    tx.fxRate = t.fxRate;
+    tx.destination = t.destination;
+    tx.destinationMemo = t.memo;
+    if (t.status === 'failed') return this.fail(tx, t.failureReason ?? 'The Stellar transfer failed.');
+    tx.status = t.status === 'success' ? TxStatus.SUCCESS : TxStatus.PENDING;
+    tx.failureReason = null;
+    return this.txRepository.save(tx);
+  }
+
+  /** A refusal (bad address, refund cap…) fails the row; an unreachable service leaves it pending for the reconciler. */
+  private async stellarError(tx: EscrowTransaction, err: unknown): Promise<EscrowTransaction> {
+    if (err instanceof StellarServiceError && err.isRejection) return this.fail(tx, err.message);
+    this.logger.warn(`Stellar ${tx.reference}: ${(err as Error).message}. The reconciler will try again.`);
+    tx.failureReason = 'Waiting for stellar-payment-service';
+    return this.txRepository.save(tx);
+  }
+
+  /** `transfer.succeeded` / `transfer.failed` from the service. Ignores rows that are already final. */
+  async onStellarTransferEvent(t: ServiceTransfer): Promise<void> {
+    const tx = await this.txRepository.findOne({ where: { reference: t.clientReference, provider: PaymentProvider.STELLAR } });
+    if (!tx || tx.status === TxStatus.SUCCESS) return;
+    if (tx.status === TxStatus.FAILED && t.status === 'failed') return;
+    await this.applyTransfer(tx, t);
+  }
+
+  /**
+   * Stellar rows still pending after a few minutes: ask the service again. Creation is
+   * idempotent on the reference, so this either returns the existing transfer's state or
+   * creates it if the first request never arrived.
+   */
+  async reconcileStellar(now = new Date()): Promise<void> {
+    if (!this.stellar?.isConfigured) return;
+    const stale = await this.txRepository.find({
+      where: { provider: PaymentProvider.STELLAR, status: TxStatus.PENDING, updatedAt: LessThan(new Date(now.getTime() - 2 * 60 * 1000)) },
+      order: { createdAt: 'ASC' },
+      take: 100,
+    });
+    for (const tx of stale) {
+      if (tx.type === TxType.HOLD) continue;
+      await this.executeStellar(tx);
+    }
   }
 
   // ── Webhooks ──
@@ -259,16 +395,42 @@ export class EscrowService {
   /** Money that should have moved didn't: an admin needs to fix the account or retry from /admin. */
   private alertFailure(tx: EscrowTransaction) {
     const what = tx.type === TxType.REFUND ? 'Refund' : `Payout to ${tx.partyType ?? 'party'}`;
+    const usdc = tx.assetAmount ? ` / ${tx.assetAmount} USDC` : '';
     this.alerts?.notify({
-      title: `${what} ${tx.status}: ₦${tx.amount.toLocaleString('en-NG')} (${tx.reference})`,
+      title: `${what} ${tx.status}: ₦${tx.amount.toLocaleString('en-NG')}${usdc} (${tx.reference})`,
       details: [
         `Reason: ${tx.failureReason ?? 'unknown'}`,
+        `Provider: ${tx.provider ?? PaymentProvider.PAYSTACK}`,
         `Order: ${tx.orderId}`,
         `Transaction: ${tx.id}`,
+        tx.txHash ? `Stellar tx: ${tx.txHash}` : null,
         'Retry it from the admin console once the cause is fixed.',
-      ].join('\n'),
+      ]
+        .filter(Boolean)
+        .join('\n'),
       signature: `escrow:${tx.id}:${tx.status}:${tx.reference}`,
     });
+  }
+
+  /** The HOLD a refund returns money from. */
+  private holdFor(tx: EscrowTransaction): Promise<EscrowTransaction | null> {
+    return tx.holdReference
+      ? this.txRepository.findOne({ where: { reference: tx.holdReference, type: TxType.HOLD } })
+      : this.txRepository.findOne({ where: { orderId: tx.orderId, type: TxType.HOLD, status: TxStatus.SUCCESS } });
+  }
+
+  /** Stellar when the payee chose it and Stellar payouts are on; otherwise the bank through Paystack. */
+  private async payoutProvider(em: EntityManager, party: { type: 'tailor' | 'merchant'; id: string }): Promise<PaymentProvider> {
+    if (!(await this.stellar?.payoutsEnabled())) return PaymentProvider.PAYSTACK;
+    const entity = party.type === 'tailor' ? TailorProfile : MerchantProfile;
+    const profile = (await em.findOne(entity, { where: { id: party.id } })) as TailorProfile | MerchantProfile | null;
+    return profile?.payoutMethod === 'stellar' && profile.stellarAddress ? PaymentProvider.STELLAR : PaymentProvider.PAYSTACK;
+  }
+
+  private payeeProfile(tx: EscrowTransaction): Promise<TailorProfile | MerchantProfile | null> {
+    return tx.partyType === 'tailor'
+      ? this.dataSource.getRepository(TailorProfile).findOne({ where: { id: tx.partyId } })
+      : this.dataSource.getRepository(MerchantProfile).findOne({ where: { id: tx.partyId } });
   }
 
   /** The payee's Paystack recipient code, creating and storing one on first payout. */
@@ -290,3 +452,4 @@ export class EscrowService {
     return code;
   }
 }
+

@@ -83,6 +83,7 @@ See `.env.example`. Beyond the database and JWT secrets:
 | `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET`, `CLOUDINARY_FOLDER` | File uploads (KYC documents, CAC certificates, fit photos, fabric images). Uploads return 503 until these are set. |
 
 | `PAYSTACK_SECRET_KEY`, `PAYSTACK_BASE_URL`, `PAYMENT_CALLBACK_URL` | Paystack checkout, webhook verification, payouts and refunds. Payment endpoints return 503 until the key is set. |
+| `STELLAR_SERVICE_URL`, `STELLAR_SERVICE_API_KEY`, `STELLAR_SERVICE_ADMIN_KEY`, `STELLAR_WEBHOOK_SECRET` | USDC payments on Stellar through **stellar-payment-service**, which holds the Stellar keys. Point the service's `WEBHOOK_URL` at `/payments/stellar/webhook`. Stellar is off until these are set and the service has it enabled. |
 | `PLATFORM_FEE_PERCENT`, `AUTO_APPROVE_DAYS` | Fee added to each order (default 0) and days before a delivered order auto-completes (default 7) |
 | `VERTEX_AI_PROJECT_ID`, `VERTEX_AI_LOCATION`, `VERTEX_IMAGEN_MODEL`, `GOOGLE_APPLICATION_CREDENTIALS_JSON` | AI Design Studio (Vertex AI Imagen). AI Studio returns 503 until configured. |
 | `AI_DAILY_LIMIT` | AI generations per person per UTC day (default 20) |
@@ -100,6 +101,10 @@ The full contract is in [`docs/orders-payments-ai-contract.md`](docs/orders-paym
   the artisan confirms it arrived.
 - **Paystack setup:** in the dashboard set the webhook URL to `https://<api-domain>/payments/paystack/webhook`, enable
   Transfers and turn off the transfer OTP so payouts can run automatically, and keep a balance for payouts.
+- **Stellar (USDC):** handled by the separate **stellar-payment-service**. `POST /orders/:id/pay {"method":"stellar"}` gets a
+  quote from it. Its signed `payment.received` webhook settles the order through the same `applyPayment` path as Paystack.
+  Stellar payouts and refunds are service transfers keyed by the escrow reference (idempotent), and `transfer.*` webhooks
+  update the escrow rows. Contract: [`docs/orders-payments-ai-contract.md`](docs/orders-payments-ai-contract.md#payments--stellar-usdc).
 - **Chat:** Socket.IO namespace `/chat` (access token in `auth.token`) plus REST history at `/orders/:id/messages`.
   nginx must pass WebSocket upgrades (the provided `scripts/setup-nginx.sh` does).
 - **AI Studio:** `/ai-studio/*`; images are generated with Imagen and stored on Cloudinary.

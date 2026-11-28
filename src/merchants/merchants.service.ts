@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { MerchantProfile } from './entities/merchant-profile.entity.js';
@@ -10,7 +10,15 @@ import { ReviewDecisionDto } from '../common/dto/review.dto.js';
 import { sendReviewOutcome } from '../common/review-mail.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
 import { definedOnly } from '../common/defined-only.js';
-import { PAYOUT_FIELDS, notifyPayoutAccountChanged, resetRecipientIfChanged } from '../common/payout-account.js';
+import {
+  PAYOUT_FIELDS,
+  describePayoutDestination,
+  notifyPayoutAccountChanged,
+  payoutSnapshot,
+  resetRecipientIfChanged,
+  validateStellarPayout,
+} from '../common/payout-account.js';
+import { StellarPaymentsClient } from '../payments/stellar/stellar-payments.client.js';
 
 /** Fields a verified merchant may keep editing without going back through review. */
 const LIVE_EDITABLE: (keyof SaveMerchantProfileDto)[] = ['marketHub', 'state', 'specialtyFabrics'];
@@ -38,6 +46,7 @@ export class MerchantsService {
     private readonly userRepository: Repository<User>,
     private readonly mail: MailService,
     private readonly notifications: NotificationsService,
+    @Optional() private readonly stellar?: StellarPaymentsClient,
   ) {}
 
   async getMine(user: User): Promise<MerchantProfile | null> {
@@ -72,14 +81,15 @@ export class MerchantsService {
           )
         : sent;
 
-    const before = { bankCode: profile.bankCode ?? null, accountNumber: profile.accountNumber ?? null };
+    const before = payoutSnapshot(profile);
     Object.assign(profile, editable);
+    await validateStellarPayout(profile, this.stellar, before);
     const payoutChanged = resetRecipientIfChanged(profile, before);
     if (editable.cacNumber) profile.cacNumber = editable.cacNumber.toUpperCase().replace(' ', '-');
     if (profile.verificationStatus === KycStatus.REJECTED) profile.verificationStatus = KycStatus.DRAFT;
     const saved = await this.merchantRepository.save(profile);
     if (payoutChanged && saved.verificationStatus === KycStatus.APPROVED) {
-      await notifyPayoutAccountChanged(this.mail, user.email, saved.accountNumber);
+      await notifyPayoutAccountChanged(this.mail, user.email, describePayoutDestination(saved));
     }
     return saved;
   }

@@ -1,5 +1,6 @@
 import { BadGatewayException, BadRequestException, Controller, Get, Query } from '@nestjs/common';
 import { PaystackError, PaystackService } from './paystack.service.js';
+import { StellarPaymentsClient, toHttpError } from './stellar/stellar-payments.client.js';
 import { Public } from '../common/decorators/public.decorator.js';
 import { Roles } from '../common/decorators/roles.decorator.js';
 import { RateLimit } from '../common/rate-limit/rate-limit.js';
@@ -7,7 +8,36 @@ import { UserRole } from '../types/index.js';
 
 @Controller('payments')
 export class PaymentsController {
-  constructor(private readonly paystack: PaystackService) {}
+  constructor(
+    private readonly paystack: PaystackService,
+    private readonly stellar: StellarPaymentsClient,
+  ) {}
+
+  /** Which payment methods checkout and payout forms should offer. */
+  @Public()
+  @Get('methods')
+  async methods() {
+    const config = await this.stellar.serviceConfig();
+    return {
+      paystack: this.paystack.isConfigured,
+      stellar: Boolean(config?.checkoutEnabled),
+      stellarPayouts: Boolean(config?.payoutsEnabled),
+      stellarNetwork: config && (config.checkoutEnabled || config.payoutsEnabled) ? config.network : null,
+    };
+  }
+
+  /** Whether USDC can be paid out to this Stellar address (exists, trusts USDC). */
+  @Get('stellar/check-address')
+  @Roles(UserRole.TAILOR, UserRole.MERCHANT)
+  @RateLimit({ name: 'stellar-check-address', limit: 30, windowSec: 60 * 60, by: ['user'] })
+  async checkStellarAddress(@Query('address') address = '') {
+    if (!this.stellar.isConfigured) throw new BadRequestException('USDC payouts are not available yet.');
+    try {
+      return await this.stellar.checkAddress(address.trim());
+    } catch (err) {
+      toHttpError(err);
+    }
+  }
 
   /** Nigerian banks with their Paystack codes, for payout account forms. */
   @Public()

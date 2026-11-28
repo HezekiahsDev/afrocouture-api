@@ -1,4 +1,5 @@
 import {
+  IsIn,
   ArrayMaxSize,
   IsArray,
   IsInt,
@@ -11,6 +12,7 @@ import {
   MaxLength,
   Min,
 } from 'class-validator';
+import { PAYOUT_METHODS, type PayoutMethod } from '../../common/payout-account.js';
 
 const url = { protocols: ['https'], require_protocol: true };
 
@@ -74,4 +76,20 @@ export class SaveTailorProfileDto {
   accountNumber?: string;
 
   @IsOptional() @IsString() @MaxLength(120) accountName?: string;
+
+  /** 'bank' (default) or 'stellar' for USDC payouts. */
+  @IsOptional()
+  @IsIn(PAYOUT_METHODS, { message: 'Choose bank or Stellar (USDC) payouts.' })
+  payoutMethod?: PayoutMethod;
+
+  /** Stellar account that receives USDC payouts. Send an empty string to clear it. */
+  @IsOptional()
+  @Matches(/^(G[A-Z2-7]{55})?$/i, { message: 'Enter a valid Stellar address (starts with G, 56 characters).' })
+  stellarAddress?: string;
+
+  /** Memo the receiving exchange requires (a number or up to 28 characters). Empty string clears it. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(28, { message: 'A Stellar memo is at most 28 characters.' })
+  stellarMemo?: string;
 }

@@ -82,6 +82,40 @@ If the key is missing every payment endpoint returns **503 "Payments are not ava
 Profiles: `SaveTailorProfileDto` / `SaveMerchantProfileDto` gain `bankCode`; `bankCode` joins the submit-required lists.
 Changing `bankCode`/`accountNumber` clears `paystackRecipientCode`.
 
+## Payments — Stellar USDC
+
+Stellar runs in a separate service, **stellar-payment-service**, which holds the keys, watches Horizon, converts amounts,
+sends payouts and refunds exactly once, and keeps unmatched deposits and the treasury. This API keeps orders and the
+**whole-naira** escrow ledger. The service's own docs (`docs/integration.md`) define its API.
+
+- **Client:** `StellarPaymentsClient` (`src/payments/stellar/stellar-payments.client.ts`). Env: `STELLAR_SERVICE_URL`,
+  `STELLAR_SERVICE_API_KEY`, `STELLAR_SERVICE_ADMIN_KEY` (admin console only), `STELLAR_WEBHOOK_SECRET`.
+- **Methods:** `GET /payments/methods` reads the service's `/v1/config`, cached for 60 s.
+- **Checkout:** `POST /orders/:id/pay { method: 'stellar', payerAddress?, refundAddress?, refundMemo? }` becomes the
+  service's `POST /v1/intents { clientReference: order.reference, nairaAmount: order.totalAmount, metadata: { orderId } }`.
+  The response keeps the web app's StellarIntent shape. `GET /orders/:id/stellar-intent` shows `paid` once a hold from the
+  intent funds the order, and `rejected` once such a hold was fully refunded.
+- **Webhook `POST /payments/stellar/webhook`** (public):
+  - **Checks:** `x-stellar-signature` (`t=…,v1=HMAC-SHA256(secret, "<t>.<raw body>")`, at most 5 min old), and each
+    event id is handled once (`stellar_webhook_receipts`).
+  - **`payment.received`:** settles through `OrdersService.applyPayment` with:
+    - `holdReference = <intentReference>-<paymentId>`
+    - `covers = coversQuote && order.totalAmount === quotedNairaAmount`
+    - when `overpaid`, the hold is `nairaValue` and the extra is refunded
+    - the hold's `providerCode` is the service's payment id
+  - **`transfer.succeeded` / `transfer.failed`:** update the escrow row whose reference equals the transfer's `clientReference`.
+  - **`deposit.unmatched` / `treasury.warning`:** raise alerts.
+- **Payouts:** `POST /v1/transfers { kind: 'payout', clientReference: tx.reference, destination: stellarAddress, nairaAmount, memo }`.
+- **Refunds:** `{ kind: 'refund', clientReference: tx.reference, paymentId: hold.providerCode, share: { part: tx.amount, whole: hold.amount } }`.
+- **Idempotency:** because the escrow reference is the idempotency key, a timeout or restart is resolved by calling again;
+  a reconciler does this every minute for rows pending over 2 minutes. `retry` of a failed Stellar row calls the service's
+  `/v1/transfers/:id/retry` and keeps the same reference.
+- **Admin:** `GET /admin/stellar/treasury` and `/admin/stellar/unmatched*` pass through to the service's `/v1/admin/*`
+  using the admin key.
+- **Tests:**
+  - `test/stellar-payments.e2e-spec.ts` covers the contract with a fake client and signed webhooks.
+  - `test/stellar-live.e2e-spec.ts` (`STELLAR_LIVE=1`) runs the real service on testnet.
+
 ## Chat (`src/chat`)
 
 - REST: `GET /orders/:id/messages?before=<iso>&limit=50` (newest last), `POST /orders/:id/messages` `{ content, attachmentUrl? }`

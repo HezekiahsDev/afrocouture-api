@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Brackets, Repository } from 'typeorm';
 import { TailorProfile } from './entities/tailor-profile.entity.js';
@@ -10,7 +10,15 @@ import { ReviewDecisionDto } from '../common/dto/review.dto.js';
 import { sendReviewOutcome } from '../common/review-mail.js';
 import { NotificationsService } from '../notifications/notifications.service.js';
 import { definedOnly } from '../common/defined-only.js';
-import { PAYOUT_FIELDS, notifyPayoutAccountChanged, resetRecipientIfChanged } from '../common/payout-account.js';
+import {
+  PAYOUT_FIELDS,
+  describePayoutDestination,
+  notifyPayoutAccountChanged,
+  payoutSnapshot,
+  resetRecipientIfChanged,
+  validateStellarPayout,
+} from '../common/payout-account.js';
+import { StellarPaymentsClient } from '../payments/stellar/stellar-payments.client.js';
 
 /** Fields an approved artisan may keep editing without going back through review. */
 const LIVE_EDITABLE: (keyof SaveTailorProfileDto)[] = [
@@ -114,6 +122,7 @@ export class TailorsService {
     private readonly userRepository: Repository<User>,
     private readonly mail: MailService,
     private readonly notifications: NotificationsService,
+    @Optional() private readonly stellar?: StellarPaymentsClient,
   ) {}
 
   // ── Public directory ──
@@ -178,13 +187,14 @@ export class TailorsService {
           )
         : sent;
 
-    const before = { bankCode: profile.bankCode ?? null, accountNumber: profile.accountNumber ?? null };
+    const before = payoutSnapshot(profile);
     Object.assign(profile, editable);
+    await validateStellarPayout(profile, this.stellar, before);
     const payoutChanged = resetRecipientIfChanged(profile, before);
     if (profile.kycStatus === KycStatus.REJECTED) profile.kycStatus = KycStatus.DRAFT;
     const saved = await this.tailorRepository.save(profile);
     if (payoutChanged && saved.kycStatus === KycStatus.APPROVED) {
-      await notifyPayoutAccountChanged(this.mail, user.email, saved.accountNumber);
+      await notifyPayoutAccountChanged(this.mail, user.email, describePayoutDestination(saved));
     }
     return saved;
   }

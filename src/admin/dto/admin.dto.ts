@@ -1,5 +1,5 @@
 import { Transform } from 'class-transformer';
-import { IsBoolean, IsIn, IsInt, IsISO8601, IsOptional, IsString, IsUUID, Max, MaxLength, Min, MinLength, ValidateIf } from 'class-validator';
+import { IsBoolean, IsIn, IsInt, IsISO8601, IsOptional, IsString, IsUUID, Matches, Max, MaxLength, Min, MinLength, ValidateIf } from 'class-validator';
 import { UserRole } from '../../types/index.js';
 
 const toInt = ({ value }: { value: unknown }) => (value === undefined || value === '' ? undefined : Number(value));
@@ -54,4 +54,19 @@ export class ListAuditQuery {
 export class AdminMessagesQuery {
   @IsOptional() @IsISO8601() before?: string;
   @IsOptional() @Transform(toInt) @IsInt() @Min(1) @Max(100) limit?: number;
+}
+
+export class AttachDepositDto {
+  /** e.g. AC-7F3K2Q */
+  @IsString() @Matches(/^[A-Za-z]{2}-[A-Za-z0-9]{4,12}$/, { message: 'Enter an order reference like AC-7F3K2Q.' }) orderReference: string;
+}
+
+export class RefundDepositDto {
+  @Matches(/^G[A-Za-z2-7]{55}$/, { message: 'Enter a valid Stellar address (starts with G, 56 characters).' }) address: string;
+  /** Required when refunding to an exchange. */
+  @IsOptional() @IsString() @MaxLength(28) memo?: string;
+}
+
+export class DismissDepositDto {
+  @IsString() @MinLength(5) @MaxLength(500) note: string;
 }
